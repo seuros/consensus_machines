@@ -1,0 +1,21 @@
+module ConsensusMachines
+  VERSION: String
+  class Checkpoint
+  end
+  class Raft
+    def self.new: (Array[Integer], Integer) -> Raft
+    def role: () -> String
+    def term: () -> Integer
+    def committed: () -> Integer
+    def last: () -> [Integer, Integer]
+    def entry: (Integer) -> [Integer, Integer]?
+    def begin_election: () -> [Integer, Integer, Integer, Integer]?
+    def request_vote: (Integer, Integer, Integer, Integer) -> [Integer, bool]
+    def receive_vote: (Integer, Integer, Integer) -> String
+    def propose: (Integer) -> Integer?
+    def append_entries: (Integer, Integer, Integer, Integer, Integer, Array[[Integer, Integer]]) -> [Integer, Integer?]
+    def acknowledge: (Integer, Integer, Integer) -> bool
+    def checkpoint: () -> Checkpoint
+    def restore!: (Checkpoint) -> bool
+  end
+end
