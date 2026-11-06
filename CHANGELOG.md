@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/seuros/consensus_machines/compare/consensus_machines/v0.1.2...consensus_machines/v0.1.3) (2026-11-06)
+
+
+### Bug Fixes
+
+* crates.io keywords and categories for the core ([3eacc56](https://github.com/seuros/consensus_machines/commit/3eacc564584d1a2485c2ce150db6673ffedfc698))
+
 ## [0.1.2](https://github.com/seuros/consensus_machines/compare/consensus_machines/v0.1.1...consensus_machines/v0.1.2) (2026-11-06)
 
 
