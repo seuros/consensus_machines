@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/seuros/consensus_machines/compare/consensus_machines/v0.1.3...consensus_machines/v0.1.4) (2026-11-06)
+
+
+### Bug Fixes
+
+* extract Wrapper::advance for node revision handling ([d09a5b1](https://github.com/seuros/consensus_machines/commit/d09a5b1e6f8f7f093be7f0b3c0ddcf6188417471))
+
 ## [0.1.3](https://github.com/seuros/consensus_machines/compare/consensus_machines/v0.1.2...consensus_machines/v0.1.3) (2026-11-06)
 
 
