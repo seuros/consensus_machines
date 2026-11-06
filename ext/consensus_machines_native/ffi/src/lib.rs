@@ -58,6 +58,18 @@ impl Wrapper {
         let revision = self.state.borrow().revision.checked_add(1);
         revision.ok_or_else(|| Error::new(ruby.exception_range_error(), "revision exhausted"))
     }
+    /// Runs `step` against the node under the next revision, which stales every
+    /// checkpoint taken before it.
+    fn advance<T>(
+        &self,
+        ruby: &Ruby,
+        step: impl FnOnce(&mut dyn model::Model) -> T,
+    ) -> Result<T, Error> {
+        let revision = self.next_revision(ruby)?;
+        let mut state = self.state.borrow_mut();
+        state.revision = revision;
+        Ok(step(state.node.as_mut()))
+    }
     fn role(&self) -> &'static str {
         role(self.state.borrow().node.role())
     }
@@ -85,12 +97,7 @@ impl Wrapper {
         rb_self: Obj<Self>,
     ) -> Result<Option<(usize, u64, usize, u64)>, Error> {
         rb_self.check_frozen()?;
-        let revision = rb_self.next_revision(ruby)?;
-        let request = {
-            let mut state = rb_self.state.borrow_mut();
-            state.revision = revision;
-            state.node.begin_election()
-        };
+        let request = rb_self.advance(ruby, |node| node.begin_election())?;
         Ok(request.map(|request| {
             (
                 request.candidate,
@@ -117,12 +124,7 @@ impl Wrapper {
                 term: last_term.0,
             },
         };
-        let revision = rb_self.next_revision(ruby)?;
-        let response = {
-            let mut state = rb_self.state.borrow_mut();
-            state.revision = revision;
-            state.node.request_vote(request)
-        };
+        let response = rb_self.advance(ruby, |node| node.request_vote(request))?;
         Ok((response.term, response.vote == Vote::Granted))
     }
     fn receive_vote(
@@ -144,25 +146,14 @@ impl Wrapper {
                 ));
             }
         };
-        let revision = rb_self.next_revision(ruby)?;
-        let result = {
-            let mut state = rb_self.state.borrow_mut();
-            state.revision = revision;
-            state
-                .node
-                .receive_vote(peer, VoteResponse { term: term.0, vote })
-        };
+        let result = rb_self.advance(ruby, |node| {
+            node.receive_vote(peer, VoteResponse { term: term.0, vote })
+        })?;
         Ok(role(result))
     }
     fn propose(ruby: &Ruby, rb_self: Obj<Self>, command: Id) -> Result<Option<usize>, Error> {
         rb_self.check_frozen()?;
-        let revision = rb_self.next_revision(ruby)?;
-        let result = {
-            let mut state = rb_self.state.borrow_mut();
-            state.revision = revision;
-            state.node.propose(command.0)
-        };
-        Ok(result)
+        rb_self.advance(ruby, |node| node.propose(command.0))
     }
     // Mirrors AppendEntries metadata without Ruby policy objects.
     #[allow(clippy::too_many_arguments)]
@@ -212,12 +203,8 @@ impl Wrapper {
             committed: index(ruby, committed)?,
         };
         rb_self.check_frozen()?;
-        let revision = rb_self.next_revision(ruby)?;
-        let response = {
-            let mut state = rb_self.state.borrow_mut();
-            state.revision = revision;
-            state.node.append_entries(request, &decoded[..count])
-        };
+        let response =
+            rb_self.advance(ruby, |node| node.append_entries(request, &decoded[..count]))?;
         Ok((response.term, response.matched))
     }
     fn acknowledge(
@@ -230,13 +217,7 @@ impl Wrapper {
         rb_self.check_frozen()?;
         let peer = index(ruby, peer)?;
         let position = index(ruby, position)?;
-        let revision = rb_self.next_revision(ruby)?;
-        let result = {
-            let mut state = rb_self.state.borrow_mut();
-            state.revision = revision;
-            state.node.acknowledge(peer, term.0, position)
-        };
-        Ok(result)
+        rb_self.advance(ruby, |node| node.acknowledge(peer, term.0, position))
     }
     fn checkpoint(&self) -> Saved {
         let (checkpoint, revision) = {
