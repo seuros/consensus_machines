@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/seuros/consensus_machines/compare/consensus-machines-v0.2.0...consensus-machines-v0.2.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* keep test sources out of the packaged gem and crate ([6ef97ab](https://github.com/seuros/consensus_machines/commit/6ef97abf2cde36bf051e5919c3c32f76c32d989a))
+
 ## [0.2.0](https://github.com/seuros/consensus_machines/compare/consensus-machines-v0.1.0...consensus-machines-v0.2.0) (2026-11-06)
 
 
