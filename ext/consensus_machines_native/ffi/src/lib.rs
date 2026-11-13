@@ -1,104 +1,130 @@
 //! Native Ruby bridge for a bounded Raft model, not a consensus service.
+//! Values cross flattened; `lib/consensus_machines.rb` rebuilds the `Data`.
 mod init;
 mod model;
+mod names;
 mod values;
-use consensus_machines::{AppendRequest, Entry, Position, Role, Vote, VoteRequest, VoteResponse};
-use magnus::{Error, RArray, Ruby, Value, prelude::*, typed_data::Obj};
-use std::{cell::RefCell, sync::Arc};
-use values::{Id, index};
+use std::cell::RefCell;
 
-struct State {
-    node: Box<dyn model::Model>,
-    revision: u64,
-}
-#[magnus::wrap(class = "ConsensusMachines::Checkpoint", free_immediately, size)]
-struct Saved {
-    owner: Arc<()>,
-    revision: u64,
-    checkpoint: Box<dyn model::Durable>,
-}
+use consensus_machines::{
+    AppendRequest, AppendResponse, Entry, Position, Received, Refusal, VoteRequest, VoteResponse,
+};
+use magnus::{Error, IntoValue, RArray, Ruby, Symbol, Value, prelude::*, typed_data::Obj};
+use values::{Id, index, numbers};
+
+/// `[members, own, term, voted_for, committed, entries]`, entries flattened
+/// to `term, command, term, command, ...`.
+type SavedFields = (RArray, Id, Id, Option<Id>, Id, RArray);
+
 #[magnus::wrap(class = "ConsensusMachines::Raft", free_immediately, size)]
 struct Wrapper {
-    owner: Arc<()>,
-    state: RefCell<State>,
+    node: RefCell<Box<dyn model::Model>>,
 }
-const fn role(role: Role) -> &'static str {
-    match role {
-        Role::Follower => "follower",
-        Role::Candidate => "candidate",
-        Role::Leader => "leader",
-        _ => "unknown",
+
+/// A refusal as its symbol, or an honoured answer as whatever `honoured` builds.
+fn answer<T, V: IntoValue>(
+    ruby: &Ruby,
+    outcome: Result<T, Refusal>,
+    honoured: impl FnOnce(T) -> V,
+) -> Value {
+    match outcome {
+        Ok(value) => honoured(value).into_value_with(ruby),
+        Err(refusal) => ruby.to_symbol(names::refusal(refusal)).as_value(),
     }
 }
+
+/// The two stages every inbound answer starts with.
+fn stages<T>(ruby: &Ruby, received: &Received<T>) -> (Option<u64>, Symbol) {
+    (received.adopted, ruby.to_symbol(names::role(received.role)))
+}
+
+fn entries(ruby: &Ruby, flat: RArray) -> Result<Vec<Entry>, Error> {
+    let flat = numbers(flat)?;
+    let (pairs, odd) = flat.as_chunks::<2>();
+    if !odd.is_empty() {
+        return Err(Error::new(
+            ruby.exception_arg_error(),
+            "entries must be term, command pairs",
+        ));
+    }
+    Ok(pairs
+        .iter()
+        .map(|&[term, command]| Entry { term, command })
+        .collect())
+}
+
+fn membership(ruby: &Ruby, members: RArray) -> Result<Vec<u64>, Error> {
+    if (1..=9).contains(&members.len()) {
+        numbers(members)
+    } else {
+        Err(Error::new(
+            ruby.exception_arg_error(),
+            "membership must contain 1..9 members",
+        ))
+    }
+}
+
 impl Wrapper {
     fn new(ruby: &Ruby, members: RArray, own: Id) -> Result<Self, Error> {
-        let count = members.len();
-        if !(1..=9).contains(&count) {
-            return Err(Error::new(
-                ruby.exception_arg_error(),
-                "membership must contain 1..9 actual members",
-            ));
-        }
-        let mut ids = [0; 9];
-        for (offset, id) in ids[..count].iter_mut().enumerate() {
-            *id = members.entry::<Id>(offset.cast_signed())?.0;
-        }
-        let node = model::new(&ids[..count], index(ruby, own)?).ok_or_else(|| {
+        let members = membership(ruby, members)?;
+        let node = model::build(&members, index(ruby, own)?, None).ok_or_else(|| {
             Error::new(
                 ruby.exception_arg_error(),
                 "members must be unique and own index must be in membership",
             )
         })?;
         Ok(Self {
-            owner: Arc::new(()),
-            state: RefCell::new(State { node, revision: 0 }),
+            node: RefCell::new(node),
         })
     }
-    fn next_revision(&self, ruby: &Ruby) -> Result<u64, Error> {
-        let revision = self.state.borrow().revision.checked_add(1);
-        revision.ok_or_else(|| Error::new(ruby.exception_range_error(), "revision exhausted"))
+    fn restored(ruby: &Ruby, members: RArray, own: Id, saved: SavedFields) -> Result<Self, Error> {
+        let members = membership(ruby, members)?;
+        let (saved_members, saved_own, term, voted_for, committed, log) = saved;
+        let saved = model::Saved {
+            members: numbers(saved_members)?,
+            own: index(ruby, saved_own)?,
+            term: term.0,
+            voted_for: voted_for.map(|seat| index(ruby, seat)).transpose()?,
+            committed: index(ruby, committed)?,
+            entries: entries(ruby, log)?,
+        };
+        let node = model::build(&members, index(ruby, own)?, Some(&saved)).ok_or_else(|| {
+            Error::new(
+                ruby.exception_arg_error(),
+                "not a checkpoint of this membership and seat",
+            )
+        })?;
+        Ok(Self {
+            node: RefCell::new(node),
+        })
     }
-    /// Runs `step` against the node under the next revision, which stales every
-    /// checkpoint taken before it.
-    fn advance<T>(
-        &self,
-        ruby: &Ruby,
-        step: impl FnOnce(&mut dyn model::Model) -> T,
-    ) -> Result<T, Error> {
-        let revision = self.next_revision(ruby)?;
-        let mut state = self.state.borrow_mut();
-        state.revision = revision;
-        Ok(step(state.node.as_mut()))
+    fn members(&self) -> Vec<u64> {
+        self.node.borrow().members()
     }
-    fn role(&self) -> &'static str {
-        role(self.state.borrow().node.role())
+    fn own(&self) -> usize {
+        self.node.borrow().own()
+    }
+    fn role(ruby: &Ruby, rb_self: &Self) -> Symbol {
+        ruby.to_symbol(names::role(rb_self.node.borrow().role()))
     }
     fn term(&self) -> u64 {
-        self.state.borrow().node.term()
+        self.node.borrow().term()
     }
     fn committed(&self) -> usize {
-        self.state.borrow().node.committed()
+        self.node.borrow().committed()
     }
     fn last(&self) -> (usize, u64) {
-        let last = self.state.borrow().node.last();
+        let last = self.node.borrow().last();
         (last.index, last.term)
     }
     fn entry(ruby: &Ruby, rb_self: &Self, position: Id) -> Result<Option<(u64, u64)>, Error> {
-        let index = index(ruby, position)?;
-        Ok(rb_self
-            .state
-            .borrow()
-            .node
-            .entry(index)
-            .map(|entry| (entry.term, entry.command)))
+        let entry = rb_self.node.borrow().entry(index(ruby, position)?);
+        Ok(entry.map(|entry| (entry.term, entry.command)))
     }
-    fn begin_election(
-        ruby: &Ruby,
-        rb_self: Obj<Self>,
-    ) -> Result<Option<(usize, u64, usize, u64)>, Error> {
+    fn begin_election(ruby: &Ruby, rb_self: Obj<Self>) -> Result<Value, Error> {
         rb_self.check_frozen()?;
-        let request = rb_self.advance(ruby, |node| node.begin_election())?;
-        Ok(request.map(|request| {
+        let outcome = rb_self.node.borrow_mut().begin_election();
+        Ok(answer(ruby, outcome, |request| {
             (
                 request.candidate,
                 request.term,
@@ -112,140 +138,114 @@ impl Wrapper {
         rb_self: Obj<Self>,
         candidate: Id,
         term: Id,
-        last_index: Id,
-        last_term: Id,
-    ) -> Result<(u64, bool), Error> {
+        last: (Id, Id),
+    ) -> Result<Value, Error> {
         rb_self.check_frozen()?;
         let request = VoteRequest {
             candidate: index(ruby, candidate)?,
             term: term.0,
             last: Position {
-                index: index(ruby, last_index)?,
-                term: last_term.0,
+                index: index(ruby, last.0)?,
+                term: last.1.0,
             },
         };
-        let response = rb_self.advance(ruby, |node| node.request_vote(request))?;
-        Ok((response.term, response.vote == Vote::Granted))
+        let outcome = rb_self.node.borrow_mut().request_vote(request);
+        Ok(answer(ruby, outcome, |received| {
+            let (adopted, role) = stages(ruby, &received);
+            let (vote, reason) = names::vote(received.outcome.vote);
+            let reason = reason.map(|reason| ruby.to_symbol(reason));
+            let response = (received.outcome.term, ruby.to_symbol(vote), reason);
+            (adopted, role, response)
+        }))
     }
     fn receive_vote(
         ruby: &Ruby,
         rb_self: Obj<Self>,
         peer: Id,
         term: Id,
-        ballot: Id,
-    ) -> Result<&'static str, Error> {
+        vote: (Symbol, Option<Symbol>),
+    ) -> Result<Value, Error> {
         rb_self.check_frozen()?;
-        let peer = index(ruby, peer)?;
-        let vote = match ballot.0 {
-            0 => Vote::Denied,
-            1 => Vote::Granted,
-            _ => {
-                return Err(Error::new(
-                    ruby.exception_arg_error(),
-                    "ballot must be Integer 0 or 1",
-                ));
-            }
+        let response = VoteResponse {
+            term: term.0,
+            vote: names::to_vote(ruby, vote.0, vote.1)?,
         };
-        let result = rb_self.advance(ruby, |node| {
-            node.receive_vote(peer, VoteResponse { term: term.0, vote })
-        })?;
-        Ok(role(result))
+        let peer = index(ruby, peer)?;
+        let outcome = rb_self.node.borrow_mut().receive_vote(peer, response);
+        Ok(answer(ruby, outcome, |received| {
+            let (adopted, role) = stages(ruby, &received);
+            (
+                adopted,
+                role,
+                ruby.to_symbol(names::ballot(received.outcome)),
+            )
+        }))
     }
-    fn propose(ruby: &Ruby, rb_self: Obj<Self>, command: Id) -> Result<Option<usize>, Error> {
+    fn propose(ruby: &Ruby, rb_self: Obj<Self>, command: Id) -> Result<Value, Error> {
         rb_self.check_frozen()?;
-        rb_self.advance(ruby, |node| node.propose(command.0))
+        let outcome = rb_self.node.borrow_mut().propose(command.0);
+        Ok(answer(ruby, outcome, |position| position))
     }
-    // Mirrors AppendEntries metadata without Ruby policy objects.
-    #[allow(clippy::too_many_arguments)]
     fn append_entries(
         ruby: &Ruby,
         rb_self: Obj<Self>,
-        leader: Id,
-        term: Id,
-        previous_index: Id,
-        previous_term: Id,
+        leader: (Id, Id),
+        previous: (Id, Id),
         committed: Id,
-        entries: RArray,
-    ) -> Result<(u64, Option<usize>), Error> {
+        log: RArray,
+    ) -> Result<Value, Error> {
         rb_self.check_frozen()?;
-        let count = entries.len();
-        if count > 64 {
-            return Err(Error::new(ruby.exception_arg_error(), "at most 64 entries"));
-        }
-        let mut decoded = [Entry {
-            term: 0,
-            command: 0,
-        }; 64];
-        for (offset, entry) in decoded[..count].iter_mut().enumerate() {
-            // RArray::try_convert can invoke to_ary, permitting reentrant input
-            // mutation or freezing. Nested entries must already be Arrays.
-            let value = entries.entry::<Value>(offset.cast_signed())?;
-            let pair = RArray::from_value(value)
-                .ok_or_else(|| Error::new(ruby.exception_type_error(), "entry must be an Array"))?;
-            if pair.len() != 2 {
-                return Err(Error::new(
-                    ruby.exception_arg_error(),
-                    "entry must be [term, command_id]",
-                ));
-            }
-            *entry = Entry {
-                term: pair.entry::<Id>(0)?.0,
-                command: pair.entry::<Id>(1)?.0,
-            };
-        }
         let request = AppendRequest {
-            leader: index(ruby, leader)?,
-            term: term.0,
+            leader: index(ruby, leader.0)?,
+            term: leader.1.0,
             previous: Position {
-                index: index(ruby, previous_index)?,
-                term: previous_term.0,
+                index: index(ruby, previous.0)?,
+                term: previous.1.0,
             },
             committed: index(ruby, committed)?,
         };
-        rb_self.check_frozen()?;
-        let response =
-            rb_self.advance(ruby, |node| node.append_entries(request, &decoded[..count]))?;
-        Ok((response.term, response.matched))
+        let log = entries(ruby, log)?;
+        let outcome = rb_self.node.borrow_mut().append_entries(request, &log);
+        Ok(answer(ruby, outcome, |received| {
+            let (adopted, role) = stages(ruby, &received);
+            let (append, matched) = names::append(received.outcome.append);
+            let response = (received.outcome.term, ruby.to_symbol(append), matched);
+            (adopted, role, response)
+        }))
     }
     fn acknowledge(
         ruby: &Ruby,
         rb_self: Obj<Self>,
         peer: Id,
         term: Id,
-        position: Id,
-    ) -> Result<bool, Error> {
+        append: (Symbol, Option<Id>),
+    ) -> Result<Value, Error> {
         rb_self.check_frozen()?;
-        let peer = index(ruby, peer)?;
-        let position = index(ruby, position)?;
-        rb_self.advance(ruby, |node| node.acknowledge(peer, term.0, position))
-    }
-    fn checkpoint(&self) -> Saved {
-        let (checkpoint, revision) = {
-            let state = self.state.borrow();
-            (state.node.checkpoint(), state.revision)
+        let response = AppendResponse {
+            term: term.0,
+            append: names::to_append(ruby, append.0, append.1)?,
         };
-        Saved {
-            owner: Arc::clone(&self.owner),
-            revision,
-            checkpoint,
-        }
+        let peer = index(ruby, peer)?;
+        let outcome = rb_self.node.borrow_mut().acknowledge(peer, response);
+        Ok(answer(ruby, outcome, |received| {
+            let (adopted, role) = stages(ruby, &received);
+            (adopted, role, ruby.to_symbol(names::ack(received.outcome)))
+        }))
     }
-    fn restore(ruby: &Ruby, rb_self: Obj<Self>, saved: &Saved) -> Result<bool, Error> {
-        rb_self.check_frozen()?;
-        if !Arc::ptr_eq(&rb_self.owner, &saved.owner)
-            || rb_self.state.borrow().revision != saved.revision
-        {
-            return Err(Error::new(
-                ruby.exception_arg_error(),
-                "cross-instance or stale checkpoint",
-            ));
-        }
-        let revision = rb_self.next_revision(ruby)?;
-        let node = saved
-            .checkpoint
-            .restore()
-            .ok_or_else(|| Error::new(ruby.exception_arg_error(), "invalid checkpoint"))?;
-        *rb_self.state.borrow_mut() = State { node, revision };
-        Ok(true)
+    fn checkpoint(&self) -> (Vec<u64>, usize, u64, Option<usize>, usize, Vec<u64>) {
+        let saved = self.node.borrow().checkpoint();
+        let log = saved
+            .entries
+            .iter()
+            .flat_map(|entry| [entry.term, entry.command])
+            .collect();
+        (
+            saved.members,
+            saved.own,
+            saved.term,
+            saved.voted_for,
+            saved.committed,
+            log,
+        )
     }
 }

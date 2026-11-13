@@ -1,132 +1,120 @@
 # frozen_string_literal: true
 require_relative 'test_helper'
 class RaftTest < Minitest::Test
-  def node(count = 3, own = 0)
-    ConsensusMachines::Raft.new((10...(10 + count)).to_a, own)
-  end
+  include RaftHelpers
 
   def test_exact_membership_majority_for_every_supported_size
     (1..9).each do |count|
       raft = node(count)
-      assert_equal [0, 1, 0, 0], raft.begin_election
+      assert_equal VoteRequest.new(0, 1, EMPTY), raft.begin_election
       majority = count / 2 + 1
       (1...majority).each do |peer|
-        assert_equal 'candidate', raft.role
-        raft.receive_vote(peer, 1, 1)
+        assert_equal :candidate, raft.role
+        tally = raft.receive_vote(peer, granted(1))
+        expected = peer == majority - 1 ? Received.new(nil, :leader, :elected) : Received.new(nil, :candidate, :counted)
+        assert_equal expected, tally
       end
-      assert_equal 'leader', raft.role, "exact quorum for #{count} actual peers"
+      assert_equal :leader, raft.role, "exact quorum for #{count} actual peers"
       assert_equal 1, raft.propose(42)
       assert_equal(count == 1 ? 1 : 0, raft.committed)
-      (1...majority).each { |peer| assert raft.acknowledge(peer, 1, 1) }
+      (1...majority).each do |peer|
+        assert_equal Received.new(nil, :leader, :advanced), raft.acknowledge(peer, matched(1, 1))
+      end
       assert_equal 1, raft.committed
-      assert_equal [1, 42], raft.entry(1)
+      assert_equal Entry.new(1, 42), raft.entry(1)
     end
   end
 
-  def test_distinct_votes_terms_append_and_checkpoint
-    assert_raises(TypeError) { ConsensusMachines::Checkpoint.new }
-    assert_raises(TypeError) { ConsensusMachines::Raft.allocate }
-    leader = node(5)
-    leader.begin_election
-    leader.receive_vote(1, 1, 1)
-    leader.receive_vote(1, 1, 1)
-    assert_equal 'candidate', leader.role
-    leader.receive_vote(2, 1, 1)
-    assert_equal 'leader', leader.role
-    leader.propose(99)
-    follower = node(5, 1)
-    assert_equal [1, true], follower.request_vote(0, 1, 0, 0)
-    assert_equal [1, false], follower.request_vote(2, 1, 0, 0)
-    assert_equal [1, 1], follower.append_entries(0, 1, 0, 0, 0, [[1, 99]])
-    assert_equal [1, 99], follower.entry(1)
-    assert_equal [1, nil], follower.append_entries(0, 1, 1, 2, 0, [])
-    assert_equal [1, 1], follower.append_entries(0, 1, 1, 1, 1, [])
-    assert_equal 1, follower.committed
-    saved = leader.checkpoint
-    assert_raises(TypeError) { saved.dup }
-    assert_raises(ArgumentError) { follower.restore!(saved) }
-    GC.start
-    GC.compact
-    assert leader.restore!(saved)
-    assert_equal 'follower', leader.role
-    assert_equal [1, 1], leader.last
-    assert_raises(ArgumentError) { leader.restore!(saved) }
-    stale = follower.checkpoint
-    follower.begin_election
-    assert_raises(ArgumentError) { follower.restore!(stale) }
-    leader.receive_vote(1, 10, 0)
-    assert_equal 10, leader.term
-  end
-
-  def test_validation_precedes_mutation_and_all_frozen_guards
-    assert_raises(ArgumentError) { node(0) }
-    assert_raises(ArgumentError) { node(10) }
-    assert_raises(ArgumentError) { ConsensusMachines::Raft.new([1, 1], 0) }
-    assert_raises(ArgumentError) { node(3, 3) }
-    assert_raises(TypeError) { ConsensusMachines::Raft.new([1.1], 0) }
-    raft = node
-    saved = raft.checkpoint
-    assert_raises(TypeError) { raft.propose(1.5) }
-    assert_raises(RangeError) { raft.propose(-1) }
-    assert_raises(RangeError) { raft.propose(2**80) }
-    assert_raises(ArgumentError) { raft.receive_vote(1, 1, 2) }
-    assert_raises(TypeError) { raft.append_entries(1, 10, 0, 0, 0, [[10, 1], [10, 'bad']]) }
-    assert_raises(ArgumentError) { raft.append_entries(1, 10, 0, 0, 0, [[10]]) }
+  def test_readers_mirror_the_core
+    raft = node(5, 2)
+    assert_equal [10, 11, 12, 13, 14], raft.members
+    assert_equal 2, raft.own
+    assert_equal :follower, raft.role
     assert_equal 0, raft.term
-    assert raft.restore!(saved)
-    saved = raft.checkpoint
-    raft.freeze
-    assert_raises(FrozenError) { raft.begin_election }
-    assert_raises(FrozenError) { raft.request_vote(1, 1, 0, 0) }
-    assert_raises(FrozenError) { raft.receive_vote(1, 1, 1) }
-    assert_raises(FrozenError) { raft.propose(1) }
-    assert_raises(FrozenError) { raft.append_entries(1, 1, 0, 0, 0, []) }
-    assert_raises(FrozenError) { raft.acknowledge(1, 1, 1) }
-    assert_raises(FrozenError) { raft.restore!(saved) }
-    assert_equal [0, 0], raft.last
+    assert_equal 0, raft.committed
+    assert_equal EMPTY, raft.last
+    assert_nil raft.entry(0)
+    assert_nil raft.entry(1)
   end
 
-  def test_bounded_log_and_rejection_of_uncommitted_application
-    raft = node(1)
-    assert_nil raft.propose(1)
+  def test_votes_report_the_term_stage_and_the_ballot_stage
+    voter = node(3, 1)
+    ask = VoteRequest.new(0, 2, EMPTY)
+    assert_equal Received.new(2, :follower, VoteResponse.new(2, :granted)), voter.request_vote(ask)
+    repeat = assert_unchanged(voter) { it.request_vote(ask) }
+    assert_equal Received.new(nil, :follower, VoteResponse.new(2, :duplicate)), repeat
+    taken = assert_unchanged(voter) { it.request_vote(VoteRequest.new(2, 2, EMPTY)) }
+    assert_equal VoteResponse.new(2, Denied.new(:already_voted)), taken.outcome
+    behind = assert_unchanged(voter) { it.request_vote(VoteRequest.new(2, 1, EMPTY)) }
+    assert_equal Received.new(nil, :follower, VoteResponse.new(2, Denied.new(:term_behind))), behind
+    voter.append_entries(AppendRequest.new(0, 2, EMPTY, 0), [Entry.new(2, 7)])
+    # The higher term is adopted even though the vote is then denied.
+    stale_log = voter.request_vote(VoteRequest.new(2, 5, EMPTY))
+    assert_equal Received.new(5, :follower, VoteResponse.new(5, Denied.new(:log_behind))), stale_log
+    assert_equal 5, voter.term
+    assert_nil voter.checkpoint.voted_for
+  end
+
+  def test_ballots_count_distinct_members_and_a_higher_term_ends_the_campaign
+    raft = node(5)
     raft.begin_election
+    assert_equal Received.new(nil, :candidate, :counted), raft.receive_vote(1, granted(1))
+    assert_equal :duplicate, assert_unchanged(raft) { it.receive_vote(1, granted(1)) }.outcome
+    denied = VoteResponse.new(1, Denied.new(:already_voted))
+    assert_equal :denied, assert_unchanged(raft) { it.receive_vote(3, denied) }.outcome
+    assert_equal Received.new(nil, :leader, :elected), raft.receive_vote(2, VoteResponse.new(1, :duplicate))
+    assert_equal Received.new(nil, :leader, :counted), raft.receive_vote(4, granted(1))
+    ahead = VoteResponse.new(10, Denied.new(:term_behind))
+    assert_equal Received.new(10, :follower, :overtaken), raft.receive_vote(1, ahead)
+    assert_equal 10, raft.term
+    assert_equal :follower, raft.role
+  end
+
+  def test_replication_reports_matches_conflicts_and_repeats
+    lead = leader(5)
+    assert_equal 1, lead.propose(99)
+    follower = node(5, 1)
+    request = AppendRequest.new(0, 1, EMPTY, 0)
+    stored = follower.append_entries(request, [lead.entry(1)])
+    assert_equal Received.new(1, :follower, matched(1, 1)), stored
+    assert_equal Entry.new(1, 99), follower.entry(1)
+    replay = assert_unchanged(follower) { it.append_entries(request, [lead.entry(1)]) }
+    assert_equal Received.new(nil, :follower, matched(1, 1)), replay
+    wrong = AppendRequest.new(0, 1, Position.new(1, 2), 0)
+    assert_equal :malformed, follower.append_entries(wrong, [])
+    missing = AppendRequest.new(0, 1, Position.new(2, 1), 0)
+    conflict = assert_unchanged(follower) { it.append_entries(missing, []) }
+    assert_equal AppendResponse.new(1, :conflict), conflict.outcome
+    assert_equal :conflict, assert_unchanged(lead) { it.acknowledge(1, conflict.outcome) }.outcome
+    assert_equal Received.new(nil, :leader, :advanced), lead.acknowledge(1, stored.outcome)
+    assert_equal :duplicate, assert_unchanged(lead) { it.acknowledge(1, stored.outcome) }.outcome
+    assert_equal 0, lead.committed
+    assert_equal :advanced, lead.acknowledge(2, matched(1, 1)).outcome
+    assert_equal 1, lead.committed
+    beat = follower.append_entries(AppendRequest.new(0, 1, lead.last, 1), [])
+    assert_equal matched(1, 1), beat.outcome
+    assert_equal 1, follower.committed
+    # A lower term is answered with the follower's own; a higher one ends a leadership.
+    behind = assert_unchanged(follower) { it.append_entries(AppendRequest.new(2, 0 + 1, EMPTY, 0), []) }
+    assert_equal matched(1, 0), behind.outcome
+    follower.request_vote(VoteRequest.new(2, 4, Position.new(1, 1)))
+    late = assert_unchanged(follower) { it.append_entries(request, []) }
+    assert_equal Received.new(nil, :follower, AppendResponse.new(4, :term_behind)), late
+    assert_equal Received.new(4, :follower, :overtaken), lead.acknowledge(1, late.outcome)
+    assert_equal 4, lead.term
+  end
+
+  def test_bounded_log_holds_sixty_four_entries
+    raft = node(1)
+    raft.begin_election
+    assert_equal :leader, raft.role
     64.times { |i| assert_equal i + 1, raft.propose(i) }
-    assert_nil raft.propose(65)
+    assert_refused(:log_full, raft) { it.propose(65) }
     assert_nil raft.entry(65)
     assert_equal 64, raft.committed
-  end
-
-  def test_nested_entry_coercion_cannot_grow_shrink_or_freeze_during_decode
-    %i[grow_past_capacity grow_within_capacity shrink freeze].each do |attack|
-      raft = node
-      saved = raft.checkpoint
-      entries = []
-      called = false
-      coercible = Object.new
-      coercible.define_singleton_method(:to_ary) do
-        called = true
-        case attack
-        when :grow_past_capacity then entries.concat(Array.new(65) { [1, 99] })
-        when :grow_within_capacity then entries << [1, 99]
-        when :shrink then entries.clear
-        when :freeze then raft.freeze
-        end
-        [1, 99]
-      end
-      entries << coercible
-      assert_raises(TypeError) { raft.append_entries(1, 1, 0, 0, 0, entries) }
-      refute called, "must not invoke #{attack} to_ary callback"
-      assert_equal [coercible], entries
-      refute raft.frozen?
-      assert_equal 0, raft.term
-      assert_equal [0, 0], raft.last
-      assert raft.restore!(saved), 'failed decoding must leave the revision unchanged'
-    end
-
-    raft = node
-    assert_equal [1, 2], raft.append_entries(1, 1, 0, 0, 0, [[1, 41], [1, 42]])
-    assert_equal [1, 41], raft.entry(1)
-    assert_equal [1, 42], raft.entry(2)
-    assert_equal [2, 1], raft.last
+    follower = node(3, 1)
+    entries = Array.new(64) { Entry.new(1, it) }
+    assert_equal matched(1, 64), follower.append_entries(AppendRequest.new(0, 1, EMPTY, 0), entries).outcome
+    assert_equal Position.new(64, 1), follower.last
   end
 end

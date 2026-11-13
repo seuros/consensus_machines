@@ -11,17 +11,22 @@ gem 'consensus_machines'
 ```
 
 ```ruby
+include ConsensusMachines
+
 # Three members with ids 10, 20, 30. This process is member 0 (id 10).
-node = ConsensusMachines::Raft.new([10, 20, 30], 0)
+node = Raft.new([10, 20, 30], 0)
 
 # Election timer fired. Start a term and vote for yourself.
-node.begin_election        # => [0, 1, 0, 0]  send this RequestVote to the peers
-node.receive_vote(1, 1, 1) # => "leader"      member 1 said yes: that's a majority of 3
+request = node.begin_election   # => VoteRequest(candidate: 0, term: 1, last: Position(0, 0))
+# ...send it to the peers; member 1 answers VoteResponse(term: 1, vote: :granted)
+node.receive_vote(1, VoteResponse.new(1, :granted))
+# => Received(adopted: nil, role: :leader, outcome: :elected)   a majority of 3
 
-# Leader work: append an entry, replicate it, count the acknowledgements.
-node.propose(42)           # => 1             log index to replicate
-node.acknowledge(1, 1, 1)  # => true          member 1 stored index 1 in term 1
-node.committed             # => 1             a majority has it; apply it
+# Leader work: append an entry, replicate it, fold in the replies.
+node.propose(42)                # => 1   log index to replicate
+node.acknowledge(1, AppendResponse.new(1, Matched.new(1)))
+# => Received(adopted: nil, role: :leader, outcome: :advanced)
+node.committed                  # => 1   a majority has it; apply it
 ```
 
 Members are positional indices into the array you passed in. The second argument is which index you are.
@@ -79,33 +84,41 @@ sequenceDiagram
     A->>A: begin_election (term 1)
     A->>B: RequestVote term 1
     A->>C: RequestVote term 1
-    B->>B: request_vote → [1, true]
-    B-->>A: vote granted
-    A->>A: receive_vote(1, 1, 1) → "leader"
+    B->>B: request_vote → adopted 1, :granted
+    B-->>A: VoteResponse(1, :granted)
+    A->>A: receive_vote(1, response) → :elected
     Note over A: 2 of 3 is a majority. C's vote is not needed.
 
     A->>A: propose(42) → index 1
-    A->>B: AppendEntries [[1, 42]]
-    A->>C: AppendEntries [[1, 42]]
-    B->>B: append_entries → [1, 1]
-    B-->>A: stored index 1
-    A->>A: acknowledge(1, 1, 1) → true
+    A->>B: AppendEntries [Entry(1, 42)]
+    A->>C: AppendEntries [Entry(1, 42)]
+    B->>B: append_entries → Matched(1)
+    B-->>A: AppendResponse(1, Matched(1))
+    A->>A: acknowledge(1, response) → :advanced
     Note over A: committed = 1. Apply entry 1.
     A->>C: AppendEntries, committed 1
-    C->>C: append_entries → [1, 1], committed 1
+    C->>C: append_entries → Matched(1), committed 1
 ```
 
 ## How Command Works
 
+### Two stages, one answer
+
+Every message a node receives is handled in two stages, and the answer shows both. It comes back as `Received(adopted, role, outcome)`.
+
+First the terms are reconciled. If the sender is in a higher term, the node moves into it, forgets its vote, and becomes a follower: `adopted` is that term. Otherwise `adopted` is `nil`. Then the message itself is answered: that is `outcome`. The two are independent. A node can adopt a term and still deny the vote that carried it, and you have to write that new term to disk either way.
+
+A denied vote or a rejected append is not a failure. It is the reply Raft wants you to send back. A *refusal* is different: the call made no sense on this node (a member index that doesn't exist, a proposal on a follower), nothing changed, not even the term, and you get a bare Symbol. See [Every answer](#every-answer).
+
 ### Becoming a candidate
 
-`begin_election` bumps the term, votes for yourself, and hands you the four numbers the peers need: your member index, the term, and your last log index and term.
+`begin_election` bumps the term, votes for yourself, and hands you the `VoteRequest` the peers need: your member index, the term, and your last log position.
 
 ```ruby
-node = ConsensusMachines::Raft.new([10, 20, 30, 40, 50], 0)
+node = Raft.new([10, 20, 30, 40, 50], 0)
 
-node.begin_election   # => [0, 1, 0, 0]
-node.role             # => "candidate"
+node.begin_election   # => VoteRequest(candidate: 0, term: 1, last: Position(index: 0, term: 0))
+node.role             # => :candidate
 node.term             # => 1
 ```
 
@@ -113,94 +126,147 @@ Send that as a RequestVote to every peer.
 
 ### Answering a vote request
 
-A peer feeds the request into its own node and sends back what it gets. One vote per term, to the first eligible candidate who asked.
+A peer feeds the request into its own node and sends back the `outcome`. One vote per term, to the first eligible candidate who asked.
 
 ```ruby
-peer = ConsensusMachines::Raft.new([10, 20, 30, 40, 50], 1)
+peer = Raft.new([10, 20, 30, 40, 50], 1)
+ask  = VoteRequest.new(0, 1, Position.new(0, 0))
 
-peer.request_vote(0, 1, 0, 0)   # => [1, true]   member 0 gets the vote
-peer.request_vote(2, 1, 0, 0)   # => [1, false]  member 2 asked too late
+peer.request_vote(ask)
+# => Received(adopted: 1, role: :follower, outcome: VoteResponse(term: 1, vote: :granted))
+peer.request_vote(ask).outcome.vote                                    # => :duplicate   asked again, same answer
+peer.request_vote(VoteRequest.new(2, 1, Position.new(0, 0))).outcome.vote
+# => Denied(reason: :already_voted)                                    member 2 asked too late
 ```
+
+`:duplicate` is a yes: this candidate already has the vote, and nothing changed. The reasons for a no are `:term_behind`, `:already_voted` and `:log_behind`.
 
 ### Counting votes
 
-`receive_vote` takes the peer's index, the term it voted in, and a ballot: 1 for yes, 0 for no. It returns your role afterwards. Repeats from the same member don't count twice.
+`receive_vote` takes the peer's index and its `VoteResponse`. The outcome says what the ballot did. Repeats from the same member don't count twice.
 
 ```ruby
-node.receive_vote(1, 1, 1)   # => "candidate"  1 of 5, plus yourself is 2
-node.receive_vote(1, 1, 1)   # => "candidate"  same member, same vote
-node.receive_vote(2, 1, 1)   # => "leader"     3 distinct of 5
+yes = VoteResponse.new(1, :granted)
+
+node.receive_vote(1, yes).outcome   # => :counted     1 of 5, plus yourself is 2
+node.receive_vote(1, yes).outcome   # => :duplicate   same member, same vote
+node.receive_vote(2, yes).outcome   # => :elected     3 distinct of 5
+node.role                           # => :leader
 ```
+
+A no is `:denied`. A vote that arrives after you won is still `:counted`; nobody is elected twice.
 
 ### Proposing and committing
 
 Only a leader can `propose`. It returns the log index to replicate. An entry is committed when a majority of distinct members has acknowledged that index in the current term.
 
 ```ruby
-node.propose(99)              # => 1
-node.committed                # => 0   nobody has it yet but you
+node.propose(99)                                    # => 1
+node.committed                                      # => 0   nobody has it yet but you
 
-node.acknowledge(1, 1, 1)     # => true
-node.committed                # => 0   2 of 5 is not a majority
-node.acknowledge(2, 1, 1)     # => true
-node.committed                # => 1   3 of 5. Apply it.
-node.entry(1)                 # => [1, 99]
+stored = AppendResponse.new(1, Matched.new(1))      # what a follower answered
+node.acknowledge(1, stored).outcome                 # => :advanced
+node.committed                                      # => 0   2 of 5 is not a majority
+node.acknowledge(1, stored).outcome                 # => :duplicate
+node.acknowledge(2, stored).outcome                 # => :advanced
+node.committed                                      # => 1   3 of 5. Apply it.
+node.entry(1)                                       # => Entry(term: 1, command: 99)
 ```
 
 The thing you propose is an Integer id. Keep the actual payload in your own store, keyed by that id.
 
 ### Replicating the log
 
-Followers take `append_entries` with the leader's index, term, the index and term of the entry just before the new ones, the leader's commit index, and the entries as `[term, id]` pairs. The reply is the follower's term and the last index it now matches, or `nil` when the prefix didn't line up.
+Followers take `append_entries` with an `AppendRequest` (the leader's index, its term, the position just before the new entries, the leader's commit index) and the entries. The reply says how far the follower's log now agrees with the leader's.
 
 ```ruby
-follower = ConsensusMachines::Raft.new([10, 20, 30, 40, 50], 1)
+follower = Raft.new([10, 20, 30, 40, 50], 1)
+start    = Position.new(0, 0)
 
-follower.append_entries(0, 1, 0, 0, 0, [[1, 99]])   # => [1, 1]    stored index 1
-follower.entry(1)                                   # => [1, 99]
-follower.append_entries(0, 1, 1, 2, 0, [])          # => [1, nil]  prefix mismatch, refused
-follower.append_entries(0, 1, 1, 1, 1, [])          # => [1, 1]    heartbeat carrying commit 1
-follower.committed                                  # => 1
+follower.append_entries(AppendRequest.new(0, 1, start, 0), [Entry.new(1, 99)])
+# => Received(adopted: 1, role: :follower, outcome: AppendResponse(term: 1, append: Matched(index: 1)))
+follower.entry(1)                                                             # => Entry(term: 1, command: 99)
+follower.append_entries(AppendRequest.new(0, 1, Position.new(2, 1), 0), []).outcome.append
+# => :conflict                                                                nothing at index 2 yet
+follower.append_entries(AppendRequest.new(0, 1, Position.new(1, 1), 1), []).outcome.append
+# => Matched(index: 1)                                                        heartbeat carrying commit 1
+follower.committed                                                            # => 1
 ```
 
-A `nil` match means the leader has to back up and send from an earlier index.
+Hand each reply to the leader's `acknowledge`. `:conflict` means the leader has to back up and send from an earlier position. `:term_behind` means the leader is from an old term, and the reply carries the term it should adopt.
 
 ### Terms only go up
 
-Any message carrying a higher term pulls the node into that term and back to follower. A leader from term 1 hearing about term 10 is a follower in term 10.
+Any message carrying a higher term pulls the node into that term and back to follower, and the answer says so in `adopted`. A leader from term 1 hearing about term 10 is a follower in term 10.
 
 ```ruby
-node.role                     # => "leader"
-node.receive_vote(1, 10, 0)
+node.role                     # => :leader
+node.receive_vote(1, VoteResponse.new(10, Denied.new(:term_behind)))
+# => Received(adopted: 10, role: :follower, outcome: :overtaken)
 node.term                     # => 10
-node.role                     # => "follower"
 ```
+
+Only an honoured message does this. A refused one adopts nothing.
 
 ### Checkpoints
 
-`checkpoint` captures the node as it is right now. `restore!` puts it back, as a follower. A checkpoint is good only for the node that made it and only until that node changes again.
+`checkpoint` is the node's durable state as plain data: members, seat, term, vote, commit index, entries. Write it to disk however you like. `Raft.restored` builds the node back from it, as a follower.
 
 ```ruby
-node = ConsensusMachines::Raft.new([10, 20, 30], 0)
+node = Raft.new([10, 20, 30], 0)
 node.begin_election
 saved = node.checkpoint
+# => Checkpoint(members: [10, 20, 30], own: 0, term: 1, voted_for: 0, committed: 0, entries: [])
 
-node.restore!(saved)          # => true
-node.role                     # => "follower"
+node = Raft.restored([10, 20, 30], 0, saved)
+node.role                     # => :follower
 node.term                     # => 1
 ```
 
-Change the node and the old checkpoint is refused with `ArgumentError`. So is a checkpoint from a different node.
+You say which membership and which seat you are restoring. A checkpoint from a different membership or seat raises `ArgumentError`, and so does one no node could ever be in (a vote for a member that doesn't exist, entries from a term the node never reached). What the gem cannot know is whether the checkpoint is the *latest* one. That is your disk's job: restore an old one and the node can forget a vote it already cast.
+
+### Every answer
+
+A call that is honoured answers with a value. A call that is not honoured answers with one of the refusal symbols below, and only those, and changes nothing: no term adopted, no vote, no role change, no entry. Each refusal is the snake_case of one core `Refusal` variant; there is no catch-all symbol and refusals never raise. A `:duplicate` is an honoured repeat: what the call asked for already holds, and nothing changed.
+
+| Call | Honoured | Refusals |
+| --- | --- | --- |
+| `begin_election` | `VoteRequest` | `:term_exhausted` |
+| `request_vote(request)` | `Received` of a `VoteResponse` whose `vote` is `:granted`, `:duplicate` (this candidate already has the vote), `Denied(:term_behind)`, `Denied(:already_voted)` or `Denied(:log_behind)` | `:unknown_member`, `:own_seat`, `:malformed` |
+| `receive_vote(peer, response)` | `Received` of `:counted`, `:elected`, `:duplicate` (member already counted), `:denied` or `:overtaken` (term adopted) | `:unknown_member`, `:own_seat`, `:stale`, `:not_candidate` |
+| `propose(command)` | the new index | `:not_leader`, `:log_full` |
+| `append_entries(request, entries)` | `Received` of an `AppendResponse` whose `append` is `Matched(index)` (also for entries already held), `:conflict` or `:term_behind` | `:unknown_member`, `:own_seat`, `:malformed`, `:too_many_entries`, `:rival_leader`, `:mismatch`, `:committed_conflict` |
+| `acknowledge(peer, response)` | `Received` of `:advanced`, `:duplicate` (at or below the recorded match), `:conflict` or `:overtaken` (term adopted) | `:unknown_member`, `:own_seat`, `:stale`, `:not_leader`, `:beyond_log` |
+
+What the refusals mean:
+
+- `:unknown_member`, `:own_seat`: the index is not another member's seat.
+- `:malformed`: the message contradicts itself. A zero term, a position that can't exist in the message's term, entry terms going backwards.
+- `:too_many_entries`: the entries end past index 64.
+- `:stale`: a response from a term the node has left, or one answering a request it sent back then.
+- `:not_candidate`, `:not_leader`: a response for the current term, but the node isn't in the role that asked.
+- `:rival_leader`: an append from someone else in the term this node leads. One term, one leader; the node keeps its log.
+- `:mismatch`: an entry differs from the one the log holds at the same index and term.
+- `:committed_conflict`: the entries would replace one the node has committed.
+
+`:mismatch` and `:committed_conflict` are not part of the conversation between honest nodes. They are refused even when the append carries a higher term: the node adopts no term, changes nothing and has no reply to send. Either this node's log or the sender's is corrupt (lost storage, an old checkpoint restored, two clusters wired together). Don't reply, don't retry around it: stop the node and tell an operator.
+- `:beyond_log`: a reply claims a match past the end of the leader's log.
+- `:log_full`, `:term_exhausted`: no room for another entry, no term after `2**64-1`.
+
+`Raft.new`, `Raft.restored`, `members`, `own`, `role`, `term`, `committed`, `last`, `entry` and `checkpoint` never refuse. The two constructors raise `ArgumentError` for a configuration that can't exist.
 
 ## The Rules of the Vessel
 
 - **One to nine members**, all with distinct Integer ids. Your own index must be one of them. A majority is more than half of the real members, never padded.
 - **Ids, terms, indices, and proposals are Integers** in `0..2**64-1`. Floats and strings raise `TypeError`. Negative or oversized raise `RangeError`.
-- **Ballots are 0 or 1.** Anything else is `ArgumentError`.
-- **The log holds 64 entries.** `propose` returns `nil` when it's full, and also when you're not the leader. Nothing is evicted.
-- **A single-member cluster commits on propose.** It is its own majority.
-- **Bad input changes nothing.** Every argument is checked before any state moves. A malformed entries array raises `TypeError` and the node is exactly as it was.
-- **Frozen means frozen.** `freeze` the node and every mutation, including `restore!`, raises `FrozenError`. Reads still work.
+- **Terms and indices are protocol numbers, not handles.** Every member has to agree on what term 7 and index 3 mean, on every node and after every restart, so they are bare Integers with no scope, they mean the same thing cluster-wide on purpose, and they live in the checkpoint. An index is handed out again when an uncommitted tail is replaced; only index and term together name an entry.
+- **Values mirror the core.** `Position`, `Entry`, `VoteRequest`, `VoteResponse`, `AppendRequest`, `AppendResponse`, `Received` and `Checkpoint` are `Data` with the core struct's fields in the core's order, passed positionally. An enum variant with a field is a `Data` named after it (`Denied`, `Matched`); one without is a Symbol (`:granted`, `:conflict`, every role). Passing anything else raises `TypeError`; an unknown symbol raises `ArgumentError`.
+- **A refusal is a Symbol, never an exception, and changes nothing.** A higher term in a refused message is not adopted.
+- **The log holds 64 entries.** `propose` answers `:log_full` when it's full. Nothing is evicted.
+- **A single-member cluster leads on `begin_election` and commits on `propose`.** It is its own majority.
+- **Bad input changes nothing.** Every argument is checked before any state moves. A malformed entries array raises `TypeError` and the node is exactly as it was. Entries are never coerced: no `to_ary`, no duck typing.
+- **No clock.** Terms and indices are logical. Election timeouts and heartbeats are yours.
+- **Frozen means frozen.** `freeze` the node and every mutation raises `FrozenError`. Reads, `checkpoint` included, still work.
 
 ## What You Think You're Doing vs Reality
 
@@ -211,7 +277,7 @@ Until a majority has acknowledged an index, that entry lives on one machine that
 
 ## What's Yours
 
-The node decides. You deliver. Every `request_vote` reply, every `append_entries` reply, and every acknowledgement you fold in must have been written to disk on the node that produced it before it was sent, or a crash can make the cluster forget a vote it already cast. Run the election timer, the heartbeat, and the retries yourself. Authenticate the messages. And apply entries to your state machine only up to `committed`, in order, exactly once.
+The node decides. You deliver. Every `request_vote` reply, every `append_entries` reply, and every acknowledgement you fold in must have been written to disk on the node that produced it before it was sent, or a crash can make the cluster forget a vote it already cast. That means: after every honoured call, `checkpoint`, write it, then send. An answer with `adopted` set changed the term even if its outcome is a no. Run the election timer, the heartbeat, and the retries yourself. Authenticate the messages. And apply entries to your state machine only up to `committed`, in order, exactly once.
 
 ## License
 

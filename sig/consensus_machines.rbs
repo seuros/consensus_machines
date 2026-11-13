@@ -1,21 +1,146 @@
 module ConsensusMachines
   VERSION: String
-  class Checkpoint
+
+  # A term or a log index: an Integer in 0..2**64-1. A non-Integer raises
+  # TypeError; a value outside the range raises RangeError. These are protocol
+  # numbers every member must agree on, not handles: they carry no scope.
+  type role = :follower | :candidate | :leader
+  type denial = :term_behind | :already_voted | :log_behind
+  # The core's `Vote`. :duplicate is an honoured repeat: this candidate
+  # already had the voter's vote of the term, and a candidate counts it.
+  type vote = :granted | :duplicate | Denied
+  # The core's `Append`.
+  type append = Matched | :conflict | :term_behind
+  # The core's `Ballot`. :duplicate and :denied changed nothing; :overtaken
+  # comes with Received#adopted set.
+  type ballot = :counted | :elected | :duplicate | :denied | :overtaken
+  # The core's `Ack`. :duplicate and :conflict changed nothing; :overtaken
+  # comes with Received#adopted set.
+  type ack = :advanced | :duplicate | :conflict | :overtaken
+  # Every symbol that means "this call was not honoured and changed nothing,
+  # no term adopted": one per core `Refusal` variant, no catch-all. Each
+  # method below lists exactly the ones it can answer.
+  type refusal = :unknown_member | :own_seat | :malformed | :too_many_entries | :stale | :not_candidate
+               | :not_leader | :rival_leader | :mismatch | :committed_conflict | :beyond_log | :log_full
+               | :term_exhausted
+
+  class Position < Data
+    attr_reader index: Integer
+    attr_reader term: Integer
+    def self.new: (Integer index, Integer term) -> Position
+                | (index: Integer, term: Integer) -> Position
   end
+
+  class Entry < Data
+    attr_reader term: Integer
+    attr_reader command: Integer
+    def self.new: (Integer term, Integer command) -> Entry
+                | (term: Integer, command: Integer) -> Entry
+  end
+
+  class VoteRequest < Data
+    attr_reader candidate: Integer
+    attr_reader term: Integer
+    attr_reader last: Position
+    def self.new: (Integer candidate, Integer term, Position last) -> VoteRequest
+                | (candidate: Integer, term: Integer, last: Position) -> VoteRequest
+  end
+
+  class VoteResponse < Data
+    # The responder's term after reconciling with the request.
+    attr_reader term: Integer
+    attr_reader vote: vote
+    def self.new: (Integer term, vote vote) -> VoteResponse
+                | (term: Integer, vote: vote) -> VoteResponse
+  end
+
+  class Denied < Data
+    attr_reader reason: denial
+    def self.new: (denial reason) -> Denied
+                | (reason: denial) -> Denied
+  end
+
+  class AppendRequest < Data
+    attr_reader leader: Integer
+    attr_reader term: Integer
+    attr_reader previous: Position
+    attr_reader committed: Integer
+    def self.new: (Integer leader, Integer term, Position previous, Integer committed) -> AppendRequest
+                | (leader: Integer, term: Integer, previous: Position, committed: Integer) -> AppendRequest
+  end
+
+  class AppendResponse < Data
+    # The responder's term after reconciling with the request.
+    attr_reader term: Integer
+    attr_reader append: append
+    def self.new: (Integer term, append append) -> AppendResponse
+                | (term: Integer, append: append) -> AppendResponse
+  end
+
+  class Matched < Data
+    attr_reader index: Integer
+    def self.new: (Integer index) -> Matched
+                | (index: Integer) -> Matched
+  end
+
+  # An honoured inbound message, in two stages.
+  class Received[T] < Data
+    # The higher term this call moved the server into (vote cleared, now a
+    # follower), or nil when the term was kept.
+    attr_reader adopted: Integer?
+    # The role after the call.
+    attr_reader role: role
+    # What the message itself came to.
+    attr_reader outcome: T
+    def self.new: [T] (Integer? adopted, role role, T outcome) -> Received[T]
+                | [T] (adopted: Integer?, role: role, outcome: T) -> Received[T]
+  end
+
+  # A server's durable state as plain data. Persist it in any format and
+  # rebuild it with Checkpoint.new; Raft.restored validates it.
+  class Checkpoint < Data
+    attr_reader members: Array[Integer]
+    attr_reader own: Integer
+    attr_reader term: Integer
+    attr_reader voted_for: Integer?
+    attr_reader committed: Integer
+    attr_reader entries: Array[Entry]
+    def self.new: (Array[Integer] members, Integer own, Integer term, Integer? voted_for, Integer committed,
+                   Array[Entry] entries) -> Checkpoint
+                | (members: Array[Integer], own: Integer, term: Integer, voted_for: Integer?, committed: Integer,
+                   entries: Array[Entry]) -> Checkpoint
+  end
+
+  # The core's `Raft<N, 64>` for N in 1..9. Honoured answers come first in
+  # every return type, then the refusals that method can answer. Every
+  # mutating call raises FrozenError on a frozen server.
   class Raft
-    def self.new: (Array[Integer], Integer) -> Raft
-    def role: () -> String
+    # A follower in term zero with an empty log. ArgumentError unless there
+    # are 1..9 distinct members and `own` is the index of one.
+    def self.new: (Array[Integer] members, Integer own) -> Raft
+    # The server `members[own]` as `checkpoint` left it, as a follower.
+    # ArgumentError when the checkpoint belongs to another membership or seat,
+    # or is not a state a server can be in.
+    def self.restored: (Array[Integer] members, Integer own, Checkpoint checkpoint) -> Raft
+    def members: () -> Array[Integer]
+    def own: () -> Integer
+    def role: () -> role
     def term: () -> Integer
     def committed: () -> Integer
-    def last: () -> [Integer, Integer]
-    def entry: (Integer) -> [Integer, Integer]?
-    def begin_election: () -> [Integer, Integer, Integer, Integer]?
-    def request_vote: (Integer, Integer, Integer, Integer) -> [Integer, bool]
-    def receive_vote: (Integer, Integer, Integer) -> String
-    def propose: (Integer) -> Integer?
-    def append_entries: (Integer, Integer, Integer, Integer, Integer, Array[[Integer, Integer]]) -> [Integer, Integer?]
-    def acknowledge: (Integer, Integer, Integer) -> bool
+    def last: () -> Position
+    def entry: (Integer index) -> Entry?
     def checkpoint: () -> Checkpoint
-    def restore!: (Checkpoint) -> bool
+    def begin_election: () -> (VoteRequest | :term_exhausted)
+    def request_vote: (VoteRequest request)
+                      -> (Received[VoteResponse] | :unknown_member | :own_seat | :malformed)
+    def receive_vote: (Integer peer, VoteResponse response)
+                      -> (Received[ballot] | :unknown_member | :own_seat | :stale | :not_candidate)
+    # The index of the new entry.
+    def propose: (Integer command) -> (Integer | :not_leader | :log_full)
+    def append_entries: (AppendRequest request, Array[Entry] entries)
+                        -> (Received[AppendResponse] | :unknown_member | :own_seat | :malformed
+                            | :too_many_entries | :rival_leader | :mismatch | :committed_conflict)
+    def acknowledge: (Integer peer, AppendResponse response)
+                     -> (Received[ack] | :unknown_member | :own_seat | :stale | :not_leader | :beyond_log)
   end
 end
