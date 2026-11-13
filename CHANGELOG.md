@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.0](https://github.com/seuros/consensus_machines/compare/consensus_machines/v0.1.4...consensus_machines/v0.2.0) (2026-11-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* converted to the fleet conventions. One exhaustive Refusal per crate, Result from every operation that can refuse, a refusal changes nothing, provable idempotent repeats are honoured, Ruby mirrors the core. No compatibility aliases. Requires quorum-machines >= 0.3. Inbound calls return Result<Received<T>, Refusal>; restore is restored(members, own, checkpoint); Ruby mirrors the request and response structs as values.
+
+### Features
+
+* report term adoption separately from refusals and make every Raft answer explicit ([7d6513e](https://github.com/seuros/consensus_machines/commit/7d6513e3dc5ae54ff0cde572c5e6b4b3fc1168f3))
+
 ## [0.1.4](https://github.com/seuros/consensus_machines/compare/consensus_machines/v0.1.3...consensus_machines/v0.1.4) (2026-11-06)
 
 
