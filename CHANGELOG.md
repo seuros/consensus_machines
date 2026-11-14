@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/seuros/consensus_machines/compare/consensus_machines/v0.2.0...consensus_machines/v0.3.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* refuse impossible replies as Malformed before term adoption, refuse term-zero votes, native message reads, clone-then-keep answers
+
+### Features
+
+* refuse impossible replies as Malformed before term adoption, refuse term-zero votes, native message reads, clone-then-keep answers ([ee400ea](https://github.com/seuros/consensus_machines/commit/ee400ea302c56e466523161e9e95819ee8b4dd82))
+
 ## [0.2.0](https://github.com/seuros/consensus_machines/compare/consensus_machines/v0.1.4...consensus_machines/v0.2.0) (2026-11-13)
 
 
