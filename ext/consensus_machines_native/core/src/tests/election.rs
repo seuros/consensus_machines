@@ -48,9 +48,9 @@ fn a_response_from_a_higher_term_is_adopted_and_reported() {
     assert_eq!(overtaken.outcome, Ballot::Overtaken);
     assert_eq!((node.term(), node.role()), (4, Role::Follower));
     assert_eq!(node.checkpoint().voted_for(), None);
-    refused(&mut node, Refusal::NotLeader, |node| node.propose(1));
+    refuses(&mut node, Refusal::NotLeader, |node| node.propose(1));
     // The same response again is now of the current term: nothing to adopt.
-    refused(&mut node, Refusal::NotCandidate, |node| {
+    refuses(&mut node, Refusal::NotCandidate, |node| {
         node.receive_vote(2, reply)
     });
 }
@@ -147,10 +147,10 @@ fn a_single_member_leads_at_once_and_the_last_term_is_refused() {
     assert_eq!(node.role(), Role::Leader);
     assert_eq!(node.propose(1), Ok(1));
     assert_eq!(node.committed(), 1);
-    refused(&mut node, Refusal::LogFull, |node| node.propose(2));
+    refuses(&mut node, Refusal::LogFull, |node| node.propose(2));
     let last = Checkpoint::<1, 1>::new([1], 0, u64::MAX, None, 0, &[]).expect("state");
     let mut node = Raft::restored([1], 0, last).expect("checkpoint");
-    refused(&mut node, Refusal::TermExhausted, Raft::begin_election);
+    refuses(&mut node, Refusal::TermExhausted, Raft::begin_election);
 }
 
 #[test]

@@ -37,8 +37,8 @@ fn restore_loses_only_the_volatile_role() {
     assert_eq!(restored.role(), Role::Follower);
     assert_eq!(restored.checkpoint(), leader.checkpoint());
     let mut restored = restored;
-    refused(&mut restored, Refusal::NotLeader, |node| node.propose(1));
-    refused(&mut restored, Refusal::NotLeader, |node| {
+    refuses(&mut restored, Refusal::NotLeader, |node| node.propose(1));
+    refuses(&mut restored, Refusal::NotLeader, |node| {
         node.acknowledge(1, matched(1, 1))
     });
 }

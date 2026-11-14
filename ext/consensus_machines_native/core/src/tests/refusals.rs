@@ -16,7 +16,7 @@ fn request_vote_refusals_change_nothing_and_adopt_no_term() {
         (Refusal::Malformed, ask(0, HIGH, at(1, HIGH + 1))),
     ];
     for (why, request) in cases {
-        refused(&mut voter, why, |voter| voter.request_vote(request));
+        refuses(&mut voter, why, |voter| voter.request_vote(request));
     }
     assert_eq!(voter.term(), 0);
 }
@@ -27,24 +27,24 @@ fn receive_vote_refusals_change_nothing_and_adopt_no_term() {
     let mut candidate = node::<4>(0);
     candidate.begin_election().expect("term");
     candidate.begin_election().expect("term");
-    refused(&mut candidate, Refusal::UnknownMember, |node| {
+    refuses(&mut candidate, Refusal::UnknownMember, |node| {
         node.receive_vote(3, grant(HIGH))
     });
-    refused(&mut candidate, Refusal::OwnSeat, |node| {
+    refuses(&mut candidate, Refusal::OwnSeat, |node| {
         node.receive_vote(0, grant(HIGH))
     });
-    refused(&mut candidate, Refusal::Stale, |node| {
+    refuses(&mut candidate, Refusal::Stale, |node| {
         node.receive_vote(1, grant(1))
     });
     // The voter answered an older request from the term the candidate is in now.
-    refused(&mut candidate, Refusal::Stale, |node| {
+    refuses(&mut candidate, Refusal::Stale, |node| {
         node.receive_vote(1, ballot(2, Vote::Denied(Denial::TermBehind)))
     });
     assert_eq!((candidate.term(), candidate.role()), (2, Role::Candidate));
     let mut follower = node::<4>(1);
     let beat = follower.append_entries(append(0, 2, EMPTY, 0), &[]);
     assert_eq!(beat.expect("append").adopted, Some(2));
-    refused(&mut follower, Refusal::NotCandidate, |node| {
+    refuses(&mut follower, Refusal::NotCandidate, |node| {
         node.receive_vote(0, grant(2))
     });
 }
@@ -52,13 +52,13 @@ fn receive_vote_refusals_change_nothing_and_adopt_no_term() {
 #[test]
 fn propose_refusals_change_nothing() {
     let mut follower = node::<1>(0);
-    refused(&mut follower, Refusal::NotLeader, |node| node.propose(1));
+    refuses(&mut follower, Refusal::NotLeader, |node| node.propose(1));
     follower.begin_election().expect("term");
-    refused(&mut follower, Refusal::NotLeader, |node| node.propose(1));
+    refuses(&mut follower, Refusal::NotLeader, |node| node.propose(1));
     let mut leader = leader::<1>();
     assert_eq!((Raft::<3, 1>::MEMBERS, Raft::<3, 1>::CAPACITY), (3, 1));
     assert_eq!(leader.propose(1), Ok(1));
-    refused(&mut leader, Refusal::LogFull, |node| node.propose(2));
+    refuses(&mut leader, Refusal::LogFull, |node| node.propose(2));
 }
 
 #[test]
@@ -104,17 +104,17 @@ fn append_entries_refusals_change_nothing_and_adopt_no_term() {
         ),
     ];
     for (why, request, entries) in cases {
-        refused(&mut follower, why, |node| {
+        refuses(&mut follower, why, |node| {
             node.append_entries(request, entries)
         });
     }
     assert_eq!(follower.term(), 1);
-    refused(&mut follower, Refusal::TooManyEntries, |node| {
+    refuses(&mut follower, Refusal::TooManyEntries, |node| {
         let far = at(usize::MAX, 1);
         node.append_entries(append(0, 1, far, 0), &[entry(1, 1)])
     });
     let mut leader = leader::<2>();
-    refused(&mut leader, Refusal::RivalLeader, |node| {
+    refuses(&mut leader, Refusal::RivalLeader, |node| {
         node.append_entries(append(1, 1, EMPTY, 0), &[])
     });
 }
@@ -138,12 +138,12 @@ fn acknowledge_refusals_change_nothing_and_adopt_no_term() {
         (Refusal::BeyondLog, 1, matched(2, 2)),
     ];
     for (why, peer, response) in cases {
-        refused(&mut leader, why, |node| node.acknowledge(peer, response));
+        refuses(&mut leader, why, |node| node.acknowledge(peer, response));
     }
     assert_eq!((leader.term(), leader.committed()), (2, 0));
     let mut follower = node::<4>(1);
     follower.begin_election().expect("term");
-    refused(&mut follower, Refusal::NotLeader, |node| {
+    refuses(&mut follower, Refusal::NotLeader, |node| {
         node.acknowledge(0, matched(1, 0))
     });
 }
@@ -174,12 +174,12 @@ fn impossible_replies_are_malformed_and_adopt_no_term() {
     candidate.begin_election().expect("term");
     for mut server in [node::<4>(0), candidate, leader::<4>()] {
         for response in votes {
-            refused(&mut server, Refusal::Malformed, |node| {
+            refuses(&mut server, Refusal::Malformed, |node| {
                 node.receive_vote(1, response)
             });
         }
         for response in appends {
-            refused(&mut server, Refusal::Malformed, |node| {
+            refuses(&mut server, Refusal::Malformed, |node| {
                 node.acknowledge(1, response)
             });
         }

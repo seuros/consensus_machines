@@ -1,61 +1,76 @@
-//! Symbol names of every core enum, and the way back for the two a caller
-//! hands in. Each match lists every variant.
+//! Symbols of every core enum, and the way back for those a caller hands
+//! in. The unit-variant enums are `symbols!` tables, checked against the
+//! enum by the compiler; `Vote` and `Append` carry data and are matched here.
 use consensus_machines::{Ack, Append, Ballot, Denial, Refusal, Role, Vote};
-use magnus::{Error, Ruby, Symbol};
+use magnus::{Error, Ruby, Symbol, Value};
+use matryona_machines::ruby::Symbols;
 
 use crate::hooks::rejected;
-use crate::values::{Id, index};
 
-pub const fn role(role: Role) -> &'static str {
-    match role {
-        Role::Follower => "follower",
-        Role::Candidate => "candidate",
-        Role::Leader => "leader",
+matryona_machines::symbols! {
+    /// The core's roles as Symbols.
+    pub Roles for Role as "role" {
+        Follower => "follower",
+        Candidate => "candidate",
+        Leader => "leader",
     }
 }
 
-pub const fn refusal(refusal: Refusal) -> &'static str {
-    match refusal {
-        Refusal::UnknownMember => "unknown_member",
-        Refusal::OwnSeat => "own_seat",
-        Refusal::Malformed => "malformed",
-        Refusal::TooManyEntries => "too_many_entries",
-        Refusal::Stale => "stale",
-        Refusal::NotCandidate => "not_candidate",
-        Refusal::NotLeader => "not_leader",
-        Refusal::RivalLeader => "rival_leader",
-        Refusal::Mismatch => "mismatch",
-        Refusal::CommittedConflict => "committed_conflict",
-        Refusal::BeyondLog => "beyond_log",
-        Refusal::LogFull => "log_full",
-        Refusal::TermExhausted => "term_exhausted",
+matryona_machines::symbols! {
+    /// The core's refusals as Symbols: the snake case of each variant.
+    pub Refusals for Refusal as "a refusal" {
+        UnknownMember => "unknown_member",
+        OwnSeat => "own_seat",
+        Malformed => "malformed",
+        TooManyEntries => "too_many_entries",
+        Stale => "stale",
+        NotCandidate => "not_candidate",
+        NotLeader => "not_leader",
+        RivalLeader => "rival_leader",
+        Mismatch => "mismatch",
+        CommittedConflict => "committed_conflict",
+        BeyondLog => "beyond_log",
+        LogFull => "log_full",
+        TermExhausted => "term_exhausted",
     }
 }
 
-const fn denial(denial: Denial) -> &'static str {
-    match denial {
-        Denial::TermBehind => "term_behind",
-        Denial::AlreadyVoted => "already_voted",
-        Denial::LogBehind => "log_behind",
+matryona_machines::symbols! {
+    /// The reasons a vote is denied, as Symbols.
+    pub Denials for Denial as "reason" {
+        TermBehind => "term_behind",
+        AlreadyVoted => "already_voted",
+        LogBehind => "log_behind",
+    }
+}
+
+matryona_machines::symbols! {
+    /// The answers to a vote response, as Symbols.
+    pub Ballots for Ballot as "a ballot" {
+        Counted => "counted",
+        Elected => "elected",
+        Duplicate => "duplicate",
+        Denied => "denied",
+        Overtaken => "overtaken",
+    }
+}
+
+matryona_machines::symbols! {
+    /// The answers to an append response, as Symbols.
+    pub Acks for Ack as "an ack" {
+        Advanced => "advanced",
+        Duplicate => "duplicate",
+        Conflict => "conflict",
+        Overtaken => "overtaken",
     }
 }
 
 /// A vote as its variant name and, for `Denied`, the reason.
-pub const fn vote(vote: Vote) -> (&'static str, Option<&'static str>) {
+pub const fn vote(vote: Vote) -> (&'static str, Option<Denial>) {
     match vote {
         Vote::Granted => ("granted", None),
         Vote::Duplicate => ("duplicate", None),
-        Vote::Denied(reason) => ("denied", Some(denial(reason))),
-    }
-}
-
-pub const fn ballot(ballot: Ballot) -> &'static str {
-    match ballot {
-        Ballot::Counted => "counted",
-        Ballot::Elected => "elected",
-        Ballot::Duplicate => "duplicate",
-        Ballot::Denied => "denied",
-        Ballot::Overtaken => "overtaken",
+        Vote::Denied(reason) => ("denied", Some(reason)),
     }
 }
 
@@ -68,67 +83,39 @@ pub const fn append(append: Append) -> (&'static str, Option<usize>) {
     }
 }
 
-pub const fn ack(ack: Ack) -> &'static str {
-    match ack {
-        Ack::Advanced => "advanced",
-        Ack::Duplicate => "duplicate",
-        Ack::Conflict => "conflict",
-        Ack::Overtaken => "overtaken",
-    }
+/// The `Role` the Symbol `value` names.
+pub fn to_role(ruby: &Ruby, value: Value) -> Result<Role, Error> {
+    Roles::parse(ruby, value)
 }
 
-pub fn to_role(ruby: &Ruby, name: Symbol) -> Result<Role, Error> {
-    match &*name.name()? {
-        "follower" => Ok(Role::Follower),
-        "candidate" => Ok(Role::Candidate),
-        "leader" => Ok(Role::Leader),
-        _ => Err(rejected(
-            ruby,
-            "role must be :follower, :candidate or :leader",
-        )),
-    }
+/// The `Denial` the Symbol `value` names.
+pub fn to_denial(ruby: &Ruby, value: Value) -> Result<Denial, Error> {
+    Denials::parse(ruby, value)
 }
 
-pub fn to_denial(ruby: &Ruby, name: Symbol) -> Result<Denial, Error> {
-    match &*name.name()? {
-        "term_behind" => Ok(Denial::TermBehind),
-        "already_voted" => Ok(Denial::AlreadyVoted),
-        "log_behind" => Ok(Denial::LogBehind),
-        _ => Err(rejected(
-            ruby,
-            "reason must be :term_behind, :already_voted or :log_behind",
-        )),
-    }
+/// The variant of table `T` named `name`, if it names one.
+fn named<T: Symbols>(name: &str) -> Option<T::Variant> {
+    T::ALL
+        .iter()
+        .copied()
+        .find(|variant| T::name(*variant) == name)
 }
 
 /// The `Ballot` a symbol names, if it names one.
 pub fn to_ballot(name: &str) -> Option<Ballot> {
-    match name {
-        "counted" => Some(Ballot::Counted),
-        "elected" => Some(Ballot::Elected),
-        "duplicate" => Some(Ballot::Duplicate),
-        "denied" => Some(Ballot::Denied),
-        "overtaken" => Some(Ballot::Overtaken),
-        _ => None,
-    }
+    named::<Ballots>(name)
 }
 
 /// The `Ack` a symbol names, if it names one.
 pub fn to_ack(name: &str) -> Option<Ack> {
-    match name {
-        "advanced" => Some(Ack::Advanced),
-        "duplicate" => Some(Ack::Duplicate),
-        "conflict" => Some(Ack::Conflict),
-        "overtaken" => Some(Ack::Overtaken),
-        _ => None,
-    }
+    named::<Acks>(name)
 }
 
-pub fn to_vote(ruby: &Ruby, name: Symbol, reason: Option<Symbol>) -> Result<Vote, Error> {
-    match (&*name.name()?, reason) {
-        ("granted", None) => Ok(Vote::Granted),
-        ("duplicate", None) => Ok(Vote::Duplicate),
-        ("denied", Some(reason)) => Ok(Vote::Denied(to_denial(ruby, reason)?)),
+/// A vote given as a bare Symbol; a denial is a `Denied`, never a Symbol.
+pub fn to_vote(ruby: &Ruby, name: Symbol) -> Result<Vote, Error> {
+    match &*name.name()? {
+        "granted" => Ok(Vote::Granted),
+        "duplicate" => Ok(Vote::Duplicate),
         _ => Err(rejected(
             ruby,
             "vote must be :granted, :duplicate or a Denied with a known reason",
@@ -136,11 +123,11 @@ pub fn to_vote(ruby: &Ruby, name: Symbol, reason: Option<Symbol>) -> Result<Vote
     }
 }
 
-pub fn to_append(ruby: &Ruby, name: Symbol, matched: Option<Id>) -> Result<Append, Error> {
-    match (&*name.name()?, matched) {
-        ("matched", Some(position)) => Ok(Append::Matched(index(ruby, position)?)),
-        ("conflict", None) => Ok(Append::Conflict),
-        ("term_behind", None) => Ok(Append::TermBehind),
+/// An append answer given as a bare Symbol; a match is a `Matched`.
+pub fn to_append(ruby: &Ruby, name: Symbol) -> Result<Append, Error> {
+    match &*name.name()? {
+        "conflict" => Ok(Append::Conflict),
+        "term_behind" => Ok(Append::TermBehind),
         _ => Err(rejected(
             ruby,
             "append must be Matched(index), :conflict or :term_behind",

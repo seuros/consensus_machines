@@ -41,11 +41,11 @@ enum Forged {
 impl<const N: usize> Cluster<N> {
     /// Hand one server a forged reply from a real peer, whatever its role.
     pub(super) fn forge(&mut self, tally: &mut Tally) {
-        let seat = self.rng.below(N);
-        let from = (seat + 1 + self.rng.below(N - 1)) % N;
+        let seat = below(&mut self.rng, N);
+        let from = (seat + 1 + below(&mut self.rng, N - 1)) % N;
         let node = &mut self.nodes[seat];
         let before = node.clone();
-        let refusal = match FORGED[self.rng.below(FORGED.len())] {
+        let refusal = match FORGED[below(&mut self.rng, FORGED.len())] {
             Forged::Vote(response) => node.receive_vote(from, response).err(),
             Forged::Append(response) => node.acknowledge(from, response).err(),
         };

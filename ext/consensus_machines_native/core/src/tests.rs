@@ -12,6 +12,8 @@ mod values;
 
 use core::fmt::Debug;
 
+use matryona_machines::testing::{SplitMix64 as Rng, refuses};
+
 use super::*;
 
 const MEMBERS: [u64; 3] = [10, 20, 30];
@@ -69,41 +71,16 @@ fn leader<const L: usize>() -> Raft<3, L> {
     node
 }
 
-/// The call is refused for `why` and the whole server equals its clone.
-fn refused<T: Debug, const N: usize, const L: usize>(
-    node: &mut Raft<N, L>,
-    why: Refusal,
-    call: impl FnOnce(&mut Raft<N, L>) -> Result<T, Refusal>,
-) {
-    let before = node.clone();
-    assert_eq!(call(node).err(), Some(why));
-    assert_eq!(*node, before, "a refusal changed the server");
-}
-
-/// The call is honoured and the whole server equals its clone.
-fn unchanged<T, const N: usize, const L: usize>(
+/// The call is honoured and the whole server equals its clone
+/// (`testing::unchanged`); answers what it was honoured with.
+fn unchanged<T: core::fmt::Debug, const N: usize, const L: usize>(
     node: &mut Raft<N, L>,
     call: impl FnOnce(&mut Raft<N, L>) -> Result<T, Refusal>,
 ) -> T {
-    let before = node.clone();
-    let answer = call(node).expect("honoured");
-    assert_eq!(*node, before, "an honoured repeat changed the server");
-    answer
+    matryona_machines::testing::unchanged(node, call).expect("honoured")
 }
 
-/// A small deterministic generator for the randomized runs.
-struct Rng(u64);
-
-impl Rng {
-    const fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut mixed = self.0;
-        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        mixed ^ (mixed >> 31)
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        usize::try_from(self.next() % (bound as u64)).expect("small")
-    }
+/// A draw in `0..bound` from the randomized runs' generator.
+fn below(rng: &mut Rng, bound: usize) -> usize {
+    usize::try_from(rng.below(bound as u64)).expect("small")
 }

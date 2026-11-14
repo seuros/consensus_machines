@@ -6,10 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 description = "Bounded fixed-membership Raft terms, votes, log matching, and commitment model"
 readme = "README.md"
-exclude = ["src/**/tests.rs", "tests/"]
+exclude = ["src/**/tests.rs", "src/tests/", "tests/"]
 keywords = ["raft", "consensus", "quorum", "replication", "no-std"]
 categories = ["no-std", "algorithms"]
 [dependencies]
 quorum-machines.workspace = true
+[dev-dependencies]
+matryona-machines = { workspace = true, features = ["testing"] }
 [lints]
 workspace = true

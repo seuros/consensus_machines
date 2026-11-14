@@ -92,4 +92,60 @@ class ForgedTest < Minitest::Test
     raft.begin_election
     assert_equal :elected, raft.receive_vote(1, granted(1).tap(&:singleton_class)).outcome
   end
+
+  def test_an_array_subclass_is_refused
+    list = Class.new(Array)
+    raft = leader
+    before = [raft.checkpoint, raft.role]
+    error = assert_raises(TypeError) { Raft.new(list[10, 11, 12], 0) }
+    assert_equal 'members must be an Array of Integers', error.message
+    assert_raises(TypeError) { Raft.restored(list[10, 11, 12], 0, raft.checkpoint) }
+    error = assert_raises(TypeError) { raft.append_entries(AppendRequest.new(1, 1, EMPTY, 0), list[]) }
+    assert_equal 'entries must be an Array of ConsensusMachines::Entry', error.message
+    assert_raises(TypeError) { Checkpoint.new(list[10, 11, 12], 0, 0, nil, 0, []) }
+    assert_raises(TypeError) { Checkpoint.new([10, 11, 12], 0, 0, nil, 0, list[]) }
+    assert_equal before, [raft.checkpoint, raft.role]
+  end
+
+  # Runs the block with every reader in `names` of `klass` raising.
+  def with_raising_readers(klass, *names)
+    names.each do |name|
+      klass.alias_method(:"__original_#{name}", name)
+      klass.define_method(name) { raise "a reader ran: #{name}" }
+    end
+    yield
+  ensure
+    names.each do |name|
+      klass.alias_method(name, :"__original_#{name}")
+      klass.remove_method(:"__original_#{name}")
+    end
+  end
+
+  # Fields are read from the struct itself: a redefined reader is never run.
+  def test_a_redefined_reader_is_ignored
+    voter = node(3, 1)
+    request = node.begin_election
+    saved = leader.checkpoint
+    with_raising_readers(VoteRequest, :candidate, :term, :last) do
+      with_raising_readers(Position, :index, :term) do
+        assert_equal :granted, voter.request_vote(request).outcome.vote
+      end
+    end
+    with_raising_readers(Checkpoint, *Checkpoint.members) do
+      assert_equal 1, Raft.restored(members, 0, saved).term
+    end
+    raft = node
+    raft.begin_election
+    with_raising_readers(VoteResponse, :term, :vote) do
+      assert_equal :elected, raft.receive_vote(1, granted(1)).outcome
+    end
+  end
+
+  def test_the_extension_alone_is_a_name_error
+    lib = File.expand_path('../lib', __dir__)
+    script = 'begin; require "consensus_machines_native/consensus_machines_native"; ' \
+             'rescue NameError => e; print e.class; end'
+    output = IO.popen([RbConfig.ruby, '-I', lib, '-e', script], err: %i[child out], &:read)
+    assert_equal 'NameError', output
+  end
 end

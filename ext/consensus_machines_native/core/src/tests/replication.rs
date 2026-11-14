@@ -102,7 +102,7 @@ fn a_candidate_yields_to_the_leader_of_its_term_without_adopting() {
     assert_eq!(beat.role, Role::Follower);
     assert_eq!(beat.outcome, matched(1, 0));
     assert_eq!(candidate.checkpoint().voted_for(), Some(1));
-    refused(&mut candidate, Refusal::NotCandidate, |candidate| {
+    refuses(&mut candidate, Refusal::NotCandidate, |candidate| {
         candidate.receive_vote(2, ballot(1, Vote::Granted))
     });
 }
@@ -118,11 +118,11 @@ fn conflicting_uncommitted_suffix_is_replaced_but_committed_prefix_is_immutable(
     assert_eq!(replaced.adopted, Some(2));
     assert_eq!(replaced.outcome.append, Append::Matched(2));
     assert_eq!(follower.entry(2), Some(entry(2, 3)));
-    refused(&mut follower, Refusal::CommittedConflict, |follower| {
+    refuses(&mut follower, Refusal::CommittedConflict, |follower| {
         follower.append_entries(append(2, 2, EMPTY, 1), &[entry(2, 99)])
     });
     // Not even a higher term replaces a committed entry, and it is not adopted.
-    refused(&mut follower, Refusal::CommittedConflict, |follower| {
+    refuses(&mut follower, Refusal::CommittedConflict, |follower| {
         follower.append_entries(append(2, 9, EMPTY, 1), &[entry(9, 99)])
     });
     let wrong = append(2, 9, at(1, 9), 1);
@@ -165,10 +165,10 @@ fn empty_heartbeats_do_not_truncate_suffix_or_commit_unmatched_tail() {
 fn a_leader_never_yields_its_log_to_a_rival_of_its_own_term() {
     let mut leader = leader::<4>();
     assert_eq!(leader.propose(5), Ok(1));
-    refused(&mut leader, Refusal::RivalLeader, |leader| {
+    refuses(&mut leader, Refusal::RivalLeader, |leader| {
         leader.append_entries(append(1, 1, EMPTY, 0), &[entry(1, 6)])
     });
-    refused(&mut leader, Refusal::RivalLeader, |leader| {
+    refuses(&mut leader, Refusal::RivalLeader, |leader| {
         leader.append_entries(append(1, 1, EMPTY, 0), &[])
     });
     assert_eq!(leader.entry(1), Some(entry(1, 5)));

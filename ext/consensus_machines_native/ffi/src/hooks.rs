@@ -5,28 +5,29 @@
 //! rejects raises `RangeError`. Each hook answers nil and the Ruby side keeps
 //! the fields it was given.
 use consensus_machines::{Outcome, Received, Role};
-use magnus::{Error, RArray, RModule, Ruby, Symbol, Value, function, prelude::*};
+use magnus::{Error, RModule, Ruby, Symbol, Value, function, prelude::*};
+use matryona_machines::ruby::{exact_array, integer, optional};
 
 use crate::read;
-use crate::values::{Id, index};
-use crate::{model, names, saved};
+use crate::{ENTRIES_ARRAY, MEMBERS_ARRAY, model, names, saved};
 
 /// A value of the right type the core rejects: out of the domain.
 pub fn rejected(ruby: &Ruby, what: &'static str) -> Error {
     Error::new(ruby.exception_range_error(), what)
 }
 
-fn position(ruby: &Ruby, at: Id, term: Id) -> Result<(), Error> {
+fn position(ruby: &Ruby, at: Value, term: Value) -> Result<(), Error> {
     read::position_of(ruby, at, term).map(drop)
 }
 
-fn entry(ruby: &Ruby, term: Id, command: Id) -> Result<(), Error> {
+fn entry(ruby: &Ruby, term: Value, command: Value) -> Result<(), Error> {
     read::entry_of(ruby, term, command).map(drop)
 }
 
-fn vote_request(ruby: &Ruby, candidate: Id, term: Id, last: Value) -> Result<(), Error> {
+fn vote_request(ruby: &Ruby, candidate: Value, term: Value, last: Value) -> Result<(), Error> {
+    let (candidate, term) = (integer(candidate, "candidate")?, integer(term, "term")?);
     let last = read::position(ruby, last)?;
-    consensus_machines::VoteRequest::new(index(ruby, candidate)?, term.0, last)
+    consensus_machines::VoteRequest::new(candidate, term, last)
         .map(drop)
         .ok_or_else(|| {
             rejected(
@@ -36,24 +37,25 @@ fn vote_request(ruby: &Ruby, candidate: Id, term: Id, last: Value) -> Result<(),
         })
 }
 
-fn vote_response(ruby: &Ruby, term: Id, vote: Value) -> Result<(), Error> {
+fn vote_response(ruby: &Ruby, term: Value, vote: Value) -> Result<(), Error> {
     read::vote_response_fields(ruby, term, vote).map(drop)
 }
 
-fn denied(ruby: &Ruby, reason: Symbol) -> Result<(), Error> {
+fn denied(ruby: &Ruby, reason: Value) -> Result<(), Error> {
     names::to_denial(ruby, reason).map(drop)
 }
 
 fn append_request(
     ruby: &Ruby,
-    leader: Id,
-    term: Id,
+    leader: Value,
+    term: Value,
     previous: Value,
-    committed: Id,
+    committed: Value,
 ) -> Result<(), Error> {
+    let (leader, term) = (integer(leader, "leader")?, integer(term, "term")?);
+    let committed = integer(committed, "committed")?;
     let previous = read::position(ruby, previous)?;
-    let (leader, committed) = (index(ruby, leader)?, index(ruby, committed)?);
-    consensus_machines::AppendRequest::new(leader, term.0, previous, committed)
+    consensus_machines::AppendRequest::new(leader, term, previous, committed)
         .map(drop)
         .ok_or_else(|| {
             rejected(
@@ -63,12 +65,12 @@ fn append_request(
         })
 }
 
-fn append_response(ruby: &Ruby, term: Id, append: Value) -> Result<(), Error> {
+fn append_response(ruby: &Ruby, term: Value, append: Value) -> Result<(), Error> {
     read::append_response_fields(ruby, term, append).map(drop)
 }
 
-fn matched(ruby: &Ruby, at: Id) -> Result<(), Error> {
-    index(ruby, at).map(drop)
+fn matched(at: Value) -> Result<(), Error> {
+    integer::<usize>(at, "index").map(drop)
 }
 
 const IMPOSSIBLE: &str = "no server gives this answer: an adopted term is the reply's, \
@@ -113,8 +115,8 @@ fn given_symbol(
 
 /// `Received.new`: the outcome is exactly a `VoteResponse`, an
 /// `AppendResponse`, or a ballot or ack Symbol.
-fn received(ruby: &Ruby, adopted: Option<Id>, role: Symbol, outcome: Value) -> Result<(), Error> {
-    let (adopted, role) = (adopted.map(|term| term.0), names::to_role(ruby, role)?);
+fn received(ruby: &Ruby, adopted: Value, role: Value, outcome: Value) -> Result<(), Error> {
+    let (adopted, role) = (optional(adopted, "adopted")?, names::to_role(ruby, role)?);
     if let Some(name) = Symbol::from_value(outcome) {
         return given_symbol(ruby, adopted, role, name);
     }
@@ -130,16 +132,22 @@ fn received(ruby: &Ruby, adopted: Option<Id>, role: Symbol, outcome: Value) -> R
 }
 
 /// `Checkpoint.new`: the core's `Checkpoint::new`, for the membership size
-/// it names. `entries` is an Array of exactly this gem's `Entry`.
+/// it names. `members` and `entries` are exactly Arrays (no subclass),
+/// `entries` of exactly this gem's `Entry`.
 fn checkpoint(
     ruby: &Ruby,
-    members: RArray,
-    own: Id,
-    term: Id,
-    voted_for: Option<Id>,
-    committed: Id,
-    entries: RArray,
+    members: Value,
+    own: Value,
+    term: Value,
+    voted_for: Value,
+    committed: Value,
+    entries: Value,
 ) -> Result<(), Error> {
+    let members = exact_array(ruby, members, MEMBERS_ARRAY)?;
+    let (own, term) = (integer(own, "own")?, integer(term, "term")?);
+    let voted_for = optional(voted_for, "voted_for")?;
+    let committed = integer(committed, "committed")?;
+    let entries = exact_array(ruby, entries, ENTRIES_ARRAY)?;
     let saved = saved(ruby, (members, own, term, voted_for, committed, entries))?;
     model::build(&saved.members, saved.own, Some(&saved))
         .map(drop)

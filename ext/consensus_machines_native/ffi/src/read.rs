@@ -6,20 +6,17 @@
 use consensus_machines::{
     Append, AppendRequest, AppendResponse, Entry, Position, Vote, VoteRequest, VoteResponse,
 };
-use magnus::{Error, RArray, Ruby, Symbol, TryConvert, Value};
+use magnus::{Error, RArray, Ruby, Symbol, Value};
+use matryona_machines::ruby::integer;
 
 use crate::classes::{Classes, classes, fields, is};
 use crate::hooks::rejected;
 use crate::names;
-use crate::values::{Id, index};
 
-fn id(value: Value) -> Result<Id, Error> {
-    Id::try_convert(value)
-}
-
-/// The core's `Position::new`.
-pub fn position_of(ruby: &Ruby, at: Id, term: Id) -> Result<Position, Error> {
-    Position::new(index(ruby, at)?, term.0).ok_or_else(|| {
+/// The core's `Position::new` of an `index` and a `term` given as Integers.
+pub fn position_of(ruby: &Ruby, at: Value, term: Value) -> Result<Position, Error> {
+    let (at, term) = (integer(at, "index")?, integer(term, "term")?);
+    Position::new(at, term).ok_or_else(|| {
         rejected(
             ruby,
             "a position's index and term are both zero or both set",
@@ -30,12 +27,13 @@ pub fn position_of(ruby: &Ruby, at: Id, term: Id) -> Result<Position, Error> {
 /// A `Position`.
 pub fn position(ruby: &Ruby, value: Value) -> Result<Position, Error> {
     let [at, term] = fields(ruby, value, classes(ruby)?.position)?;
-    position_of(ruby, id(at)?, id(term)?)
+    position_of(ruby, at, term)
 }
 
-/// The core's `Entry::new`.
-pub fn entry_of(ruby: &Ruby, term: Id, command: Id) -> Result<Entry, Error> {
-    Entry::new(term.0, command.0).ok_or_else(|| rejected(ruby, "an entry's term is positive"))
+/// The core's `Entry::new` of a `term` and a `command` given as Integers.
+pub fn entry_of(ruby: &Ruby, term: Value, command: Value) -> Result<Entry, Error> {
+    let (term, command) = (integer(term, "term")?, integer(command, "command")?);
+    Entry::new(term, command).ok_or_else(|| rejected(ruby, "an entry's term is positive"))
 }
 
 /// An Array of `Entry`. Reading an element or a struct field runs no Ruby
@@ -46,7 +44,7 @@ pub fn entries(ruby: &Ruby, list: RArray) -> Result<Vec<Entry>, Error> {
         .map(|offset| {
             let value: Value = list.entry(offset.cast_signed())?;
             let [term, command] = fields(ruby, value, class)?;
-            entry_of(ruby, id(term)?, id(command)?)
+            entry_of(ruby, term, command)
         })
         .collect()
 }
@@ -54,18 +52,17 @@ pub fn entries(ruby: &Ruby, list: RArray) -> Result<Vec<Entry>, Error> {
 /// A vote: `:granted`, `:duplicate` or a `Denied`.
 fn vote(ruby: &Ruby, classes: &Classes, value: Value) -> Result<Vote, Error> {
     if let Some(name) = Symbol::from_value(value) {
-        return names::to_vote(ruby, name, None);
+        return names::to_vote(ruby, name);
     }
     let [reason] = fields(ruby, value, classes.denied)?;
-    let reason = Symbol::from_value(reason)
-        .ok_or_else(|| Error::new(ruby.exception_type_error(), "a reason is a Symbol"))?;
     Ok(Vote::Denied(names::to_denial(ruby, reason)?))
 }
 
 /// The core's `VoteResponse::new` of a term and a vote as Ruby holds them.
-pub fn vote_response_fields(ruby: &Ruby, term: Id, given: Value) -> Result<VoteResponse, Error> {
+pub fn vote_response_fields(ruby: &Ruby, term: Value, given: Value) -> Result<VoteResponse, Error> {
+    let term = integer(term, "term")?;
     let vote = vote(ruby, classes(ruby)?, given)?;
-    VoteResponse::new(term.0, vote).ok_or_else(|| {
+    VoteResponse::new(term, vote).ok_or_else(|| {
         rejected(
             ruby,
             "a vote response's term is positive, and above one for :term_behind",
@@ -76,14 +73,14 @@ pub fn vote_response_fields(ruby: &Ruby, term: Id, given: Value) -> Result<VoteR
 /// A `VoteResponse`.
 pub fn vote_response(ruby: &Ruby, value: Value) -> Result<VoteResponse, Error> {
     let [term, given] = fields(ruby, value, classes(ruby)?.vote_response)?;
-    vote_response_fields(ruby, id(term)?, given)
+    vote_response_fields(ruby, term, given)
 }
 
 /// A `VoteRequest`, through `VoteRequest::new`.
 pub fn vote_request(ruby: &Ruby, value: Value) -> Result<VoteRequest, Error> {
     let [candidate, term, last] = fields(ruby, value, classes(ruby)?.vote_request)?;
-    let (candidate, last) = (index(ruby, id(candidate)?)?, position(ruby, last)?);
-    VoteRequest::new(candidate, id(term)?.0, last).ok_or_else(|| {
+    let (candidate, last) = (integer(candidate, "candidate")?, position(ruby, last)?);
+    VoteRequest::new(candidate, integer(term, "term")?, last).ok_or_else(|| {
         rejected(
             ruby,
             "a vote request's term is positive and not below its last position's",
@@ -94,21 +91,22 @@ pub fn vote_request(ruby: &Ruby, value: Value) -> Result<VoteRequest, Error> {
 /// An append answer: a `Matched`, `:conflict` or `:term_behind`.
 fn append(ruby: &Ruby, classes: &Classes, value: Value) -> Result<Append, Error> {
     if let Some(name) = Symbol::from_value(value) {
-        return names::to_append(ruby, name, None);
+        return names::to_append(ruby, name);
     }
     let [at] = fields(ruby, value, classes.matched)?;
-    Ok(Append::Matched(index(ruby, id(at)?)?))
+    Ok(Append::Matched(integer(at, "index")?))
 }
 
 /// The core's `AppendResponse::new` of a term and an append answer as Ruby
 /// holds them.
 pub fn append_response_fields(
     ruby: &Ruby,
-    term: Id,
+    term: Value,
     given: Value,
 ) -> Result<AppendResponse, Error> {
+    let term = integer(term, "term")?;
     let append = append(ruby, classes(ruby)?, given)?;
-    AppendResponse::new(term.0, append).ok_or_else(|| {
+    AppendResponse::new(term, append).ok_or_else(|| {
         rejected(
             ruby,
             "an append response's term is positive, and above one for :term_behind",
@@ -119,15 +117,15 @@ pub fn append_response_fields(
 /// An `AppendResponse`.
 pub fn append_response(ruby: &Ruby, value: Value) -> Result<AppendResponse, Error> {
     let [term, given] = fields(ruby, value, classes(ruby)?.append_response)?;
-    append_response_fields(ruby, id(term)?, given)
+    append_response_fields(ruby, term, given)
 }
 
 /// An `AppendRequest`, through `AppendRequest::new`.
 pub fn append_request(ruby: &Ruby, value: Value) -> Result<AppendRequest, Error> {
     let [leader, term, previous, committed] = fields(ruby, value, classes(ruby)?.append_request)?;
-    let (leader, previous) = (index(ruby, id(leader)?)?, position(ruby, previous)?);
-    let committed = index(ruby, id(committed)?)?;
-    AppendRequest::new(leader, id(term)?.0, previous, committed).ok_or_else(|| {
+    let (leader, previous) = (integer(leader, "leader")?, position(ruby, previous)?);
+    let committed = integer(committed, "committed")?;
+    AppendRequest::new(leader, integer(term, "term")?, previous, committed).ok_or_else(|| {
         rejected(
             ruby,
             "an append request's term is positive and not below its previous position's",
@@ -146,22 +144,3 @@ pub fn response_kind(ruby: &Ruby, value: Value) -> Result<Option<bool>, Error> {
         None
     })
 }
-
-macro_rules! argument {
-    ($name:ident, $core:ty, $read:path) => {
-        #[doc = concat!("A `", stringify!($core), "` argument, read by `", stringify!($read), "`.")]
-        #[derive(Clone, Copy)]
-        pub struct $name(pub $core);
-
-        impl TryConvert for $name {
-            fn try_convert(value: Value) -> Result<Self, Error> {
-                $read(&Ruby::get_with(value), value).map(Self)
-            }
-        }
-    };
-}
-
-argument!(VoteRequestValue, VoteRequest, vote_request);
-argument!(VoteResponseValue, VoteResponse, vote_response);
-argument!(AppendRequestValue, AppendRequest, append_request);
-argument!(AppendResponseValue, AppendResponse, append_response);

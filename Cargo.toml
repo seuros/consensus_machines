@@ -8,9 +8,10 @@ rust-version = "1.99"
 license = "MIT"
 [workspace.dependencies]
 consensus-machines = { path = "ext/consensus_machines_native/core" }
-magnus = { version = "0.9.3", default-features = false, features = ["rb-sys"] }
+matryona-machines = { version = ">=0.2", default-features = false }
+magnus = { version = "0.9.3", default-features = false }
 rb-sys = { version = "0.9.130", default-features = false, features = ["stable-api-compiled-fallback"] }
-quorum-machines = ">=0.3"
+quorum-machines = ">=0.4"
 [workspace.lints.rust]
 unsafe_code = "deny"
 unused_must_use = "warn"

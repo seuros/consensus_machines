@@ -131,6 +131,12 @@ class RefusalTest < Minitest::Test
     assert_raises(FrozenError) { raft.propose(1) }
     assert_raises(FrozenError) { raft.append_entries(AppendRequest.new(1, 2, EMPTY, 0), []) }
     assert_raises(FrozenError) { raft.acknowledge(1, matched(1, 0)) }
+    # Frozen is checked before the arguments are converted.
+    assert_raises(FrozenError) { raft.request_vote(Object.new) }
+    assert_raises(FrozenError) { raft.receive_vote(-1, nil) }
+    assert_raises(FrozenError) { raft.propose('1') }
+    assert_raises(FrozenError) { raft.append_entries(nil, Class.new(Array).new) }
+    assert_raises(FrozenError) { raft.acknowledge(0.5, :conflict) }
     assert_equal [saved, :leader, 1, EMPTY], [raft.checkpoint, raft.role, raft.term, raft.last]
   end
 end

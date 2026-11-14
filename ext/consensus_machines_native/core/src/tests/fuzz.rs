@@ -100,11 +100,11 @@ fn impossible<T>(before: &Node, peer: usize, valid: bool, answer: &Result<T, Ref
 /// A position around `term`: mostly plausible, sometimes impossible.
 fn position(rng: &mut Rng, term: u64) -> Position {
     Position {
-        index: rng.below(LOG + 2),
-        term: match rng.below(8) {
+        index: below(rng, LOG + 2),
+        term: match below(rng, 8) {
             0 => term + 1,
             1 => 0,
-            _ => term.saturating_sub(rng.next() % 3),
+            _ => term.saturating_sub(rng.next_u64() % 3),
         },
     }
 }
@@ -137,7 +137,7 @@ fn vote_request(node: &mut Node, rng: &mut Rng, seen: &mut Seen, peer: usize, te
 
 fn vote_reply(node: &mut Node, rng: &mut Rng, seen: &mut Seen, peer: usize, term: u64) {
     let before = node.clone();
-    let vote = match rng.below(5) {
+    let vote = match below(rng, 5) {
         0 => Vote::Denied(Denial::TermBehind),
         1 => Vote::Denied(Denial::AlreadyVoted),
         2 => Vote::Duplicate,
@@ -171,20 +171,20 @@ fn append_request(node: &mut Node, rng: &mut Rng, seen: &mut Seen, peer: usize, 
         leader: peer,
         term,
         previous: position(rng, term),
-        committed: rng.below(LOG + 2),
+        committed: below(rng, LOG + 2),
     };
     let mut entries = [Entry::default(); LOG + 1];
-    let count = rng.below(LOG + 2);
+    let count = below(rng, LOG + 2);
     let mut floor = request.previous.term;
     for entry in &mut entries[..count] {
-        floor = (floor + rng.next() % 2).min(term.max(1));
+        floor = (floor + rng.next_u64() % 2).min(term.max(1));
         *entry = Entry {
-            term: match rng.below(24) {
+            term: match below(rng, 24) {
                 0 => 0,
                 1 => term + 1,
                 _ => floor,
             },
-            command: rng.next() % 2,
+            command: rng.next_u64() % 2,
         };
     }
     let answer = node.append_entries(request, &entries[..count]);
@@ -210,10 +210,10 @@ fn append_request(node: &mut Node, rng: &mut Rng, seen: &mut Seen, peer: usize, 
 
 fn append_reply(node: &mut Node, rng: &mut Rng, seen: &mut Seen, peer: usize, term: u64) {
     let before = node.clone();
-    let append = match rng.below(5) {
+    let append = match below(rng, 5) {
         0 => Append::TermBehind,
         1 => Append::Conflict,
-        _ => Append::Matched(rng.below(LOG + 2)),
+        _ => Append::Matched(below(rng, LOG + 2)),
     };
     let answer = node.acknowledge(peer, AppendResponse { term, append });
     reconciled(seen, &before, node, term, &answer);
@@ -238,7 +238,7 @@ fn append_reply(node: &mut Node, rng: &mut Rng, seen: &mut Seen, peer: usize, te
 
 fn local(node: &mut Node, rng: &mut Rng, seen: &mut Seen) {
     let before = node.clone();
-    let answer = if rng.below(3) == 0 {
+    let answer = if below(rng, 3) == 0 {
         node.begin_election().map(|request| {
             assert_eq!(request.term, before.term() + 1);
             assert_eq!(
@@ -248,7 +248,7 @@ fn local(node: &mut Node, rng: &mut Rng, seen: &mut Seen) {
             seen.vote(request.term, before.own());
         })
     } else {
-        node.propose(rng.next() % 3)
+        node.propose(rng.next_u64() % 3)
             .map(|index| assert_eq!(index, before.last().index + 1))
     };
     if let Err(refusal) = answer {
@@ -259,10 +259,10 @@ fn local(node: &mut Node, rng: &mut Rng, seen: &mut Seen) {
 
 fn step(node: &mut Node, rng: &mut Rng, seen: &mut Seen) {
     let before = node.clone();
-    let peer = rng.below(4);
+    let peer = below(rng, 4);
     // Below, at and above the server's own term.
-    let term = (before.term() + rng.next() % 4).saturating_sub(2);
-    match rng.below(12) {
+    let term = (before.term() + rng.next_u64() % 4).saturating_sub(2);
+    match below(rng, 12) {
         0..=2 => local(node, rng, seen),
         3 | 4 => vote_request(node, rng, seen, peer, term),
         5 | 6 => vote_reply(node, rng, seen, peer, term),
@@ -282,8 +282,8 @@ fn step(node: &mut Node, rng: &mut Rng, seen: &mut Seen) {
 fn hostile_input_never_breaks_a_refusal_a_repeat_or_a_durable_promise() {
     let mut seen = Seen::default();
     for seed in 0..400 {
-        let mut rng = Rng(seed);
-        let mut node: Node = node(rng.below(3));
+        let mut rng = Rng::new(seed);
+        let mut node: Node = node(below(&mut rng, 3));
         seen.votes.clear();
         for _ in 0..2_000 {
             step(&mut node, &mut rng, &mut seen);

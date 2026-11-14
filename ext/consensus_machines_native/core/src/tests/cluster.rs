@@ -66,7 +66,7 @@ impl<const N: usize> Cluster<N> {
             nodes: core::array::from_fn(|seat| Raft::new(members, seat).expect("membership")),
             members,
             wire: Vec::new(),
-            rng: Rng(seed),
+            rng: Rng::new(seed),
             leaders: Vec::new(),
             votes: Vec::new(),
             chosen: Vec::new(),
@@ -77,7 +77,7 @@ impl<const N: usize> Cluster<N> {
 
     fn send(&mut self, message: Message) {
         if self.wire.len() == WIRE {
-            let lost = self.rng.below(WIRE);
+            let lost = below(&mut self.rng, WIRE);
             self.wire.swap_remove(lost);
         }
         self.wire.push(message);
@@ -227,10 +227,10 @@ impl<const N: usize> Cluster<N> {
     /// at random, which stands in for every retry strategy a runtime could use.
     fn replicate(&mut self, from: usize) {
         let leader = &self.nodes[from];
-        let to = (from + 1 + self.rng.below(N - 1)) % N;
+        let to = (from + 1 + below(&mut self.rng, N - 1)) % N;
         let length = leader.last().index;
-        let start = self.rng.below(length + 1);
-        let count = self.rng.below(length - start + 1);
+        let start = below(&mut self.rng, length + 1);
+        let count = below(&mut self.rng, length - start + 1);
         let term = leader.entry(start).map_or(0, |entry| entry.term);
         let request = append(
             from,
@@ -245,8 +245,8 @@ impl<const N: usize> Cluster<N> {
     }
 
     fn step(&mut self, tally: &mut Tally) {
-        let seat = self.rng.below(N);
-        match self.rng.below(120) {
+        let seat = below(&mut self.rng, N);
+        match below(&mut self.rng, 120) {
             0 => {
                 let before = self.nodes[seat].clone();
                 let request = self.nodes[seat].begin_election().expect("terms remain");
@@ -263,7 +263,7 @@ impl<const N: usize> Cluster<N> {
                 tally.restores += 1;
             }
             3..=8 if !self.wire.is_empty() => {
-                let lost = self.rng.below(self.wire.len());
+                let lost = below(&mut self.rng, self.wire.len());
                 self.wire.swap_remove(lost);
             }
             9..=24 => {
@@ -278,8 +278,8 @@ impl<const N: usize> Cluster<N> {
             60..=69 if !self.deposed.is_empty() => self.haunt(tally),
             70..=72 => self.forge(tally),
             _ if !self.wire.is_empty() => {
-                let chosen = self.rng.below(self.wire.len());
-                let message = if self.rng.below(6) == 0 {
+                let chosen = below(&mut self.rng, self.wire.len());
+                let message = if below(&mut self.rng, 6) == 0 {
                     self.wire[chosen].clone()
                 } else {
                     self.wire.swap_remove(chosen)
