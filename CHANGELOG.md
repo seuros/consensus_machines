@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/seuros/consensus_machines/compare/consensus_machines/v0.4.1...consensus_machines/v0.4.2) (2026-11-14)
+
+
+### Bug Fixes
+
+* **deps:** require matryona-machines &gt;= 0.4 and read votes, appends and responses through it ([3157989](https://github.com/seuros/consensus_machines/commit/31579897a242e848beb53b3093c80565364587cb))
+
 ## [0.4.1](https://github.com/seuros/consensus_machines/compare/consensus_machines/v0.4.0...consensus_machines/v0.4.1) (2026-11-14)
 
 
