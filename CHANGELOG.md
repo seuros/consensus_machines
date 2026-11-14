@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/seuros/consensus_machines/compare/consensus_machines/v0.4.0...consensus_machines/v0.4.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* **deps:** require matryona-machines &gt;= 0.3, adopt Symbols::variant, names_only tables and which ([25c7ee4](https://github.com/seuros/consensus_machines/commit/25c7ee40136589abae5978f55b620039c6ffb60c))
+
 ## [0.4.0](https://github.com/seuros/consensus_machines/compare/consensus_machines/v0.3.0...consensus_machines/v0.4.0) (2026-11-14)
 
 
