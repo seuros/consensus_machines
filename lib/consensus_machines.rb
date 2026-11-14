@@ -1,86 +1,151 @@
 # frozen_string_literal: true
 
 require_relative 'consensus_machines/version'
-# Native is required: no algorithm fallback.
-require 'consensus_machines_native/consensus_machines_native'
 
 # Every value mirrors the core type of the same name, field for field. Terms
 # and log indices are protocol numbers the members must agree on, so they are
 # plain Integers.
+#
+# The native side is the authority on every value it reads: it must be
+# exactly this gem's class (a subclass is a TypeError, whatever it holds), and
+# its fields are validated again through the core's constructor, so a message
+# forged past `initialize` (`Marshal.load`, a bound `Data#initialize`) raises
+# TypeError or RangeError and never reaches the server: it can never earn
+# :malformed.
 module ConsensusMachines
-  # A log position; index zero has term zero.
-  Position = Data.define(:index, :term)
+  # Asks the core's validating constructor through a private hook: TypeError
+  # for a wrong type, RangeError for a value the core rejects.
+  def self.check(hook, *fields) = __send__(hook, *fields)
+  private_class_method :check
 
-  # One log entry: the term of the leader that created it and the Integer id
-  # of a command the caller stores.
-  Entry = Data.define(:term, :command)
+  # A log position; index and term are both zero (the empty prefix) or both
+  # set. The core's `Position::new`.
+  Position = Data.define(:index, :term) do
+    def initialize(index:, term:)
+      ConsensusMachines.__send__(:check, :__position, index, term)
+      super
+    end
+  end
 
-  # RequestVote: what #begin_election answers and #request_vote is given.
-  VoteRequest = Data.define(:candidate, :term, :last)
+  # One log entry: the term of the leader that created it (positive) and the
+  # Integer id of a command the caller stores. The core's `Entry::new`.
+  Entry = Data.define(:term, :command) do
+    def initialize(term:, command:)
+      ConsensusMachines.__send__(:check, :__entry, term, command)
+      super
+    end
+  end
 
-  # The reply to a RequestVote. `vote` is :granted, :duplicate (this candidate
-  # already had the vote; counts like a grant) or a Denied.
-  VoteResponse = Data.define(:term, :vote)
+  # RequestVote: what #begin_election answers and #request_vote is given. The
+  # core's `VoteRequest::new`: a positive term, not below `last`'s.
+  VoteRequest = Data.define(:candidate, :term, :last) do
+    def initialize(candidate:, term:, last:)
+      ConsensusMachines.__send__(:check, :__vote_request, candidate, term, last)
+      super
+    end
+  end
 
   # VoteResponse#vote when the vote is kept from the candidate. `reason` is
   # :term_behind, :already_voted or :log_behind.
-  Denied = Data.define(:reason)
+  Denied = Data.define(:reason) do
+    def initialize(reason:)
+      ConsensusMachines.__send__(:check, :__denied, reason)
+      super
+    end
+  end
 
-  # AppendEntries metadata; the entries travel beside it.
-  AppendRequest = Data.define(:leader, :term, :previous, :committed)
+  # The reply to a RequestVote. `vote` is :granted, :duplicate (this candidate
+  # already had the vote; counts like a grant) or a Denied. The core's
+  # `VoteResponse::new`: a positive term, above one for :term_behind.
+  VoteResponse = Data.define(:term, :vote) do
+    def initialize(term:, vote:)
+      ConsensusMachines.__send__(:check, :__vote_response, term, vote)
+      super
+    end
+  end
 
-  # The reply to an AppendEntries. `append` is a Matched, :conflict or
-  # :term_behind.
-  AppendResponse = Data.define(:term, :append)
+  # AppendEntries metadata; the entries travel beside it. The core's
+  # `AppendRequest::new`: a positive term, not below `previous`'s.
+  AppendRequest = Data.define(:leader, :term, :previous, :committed) do
+    def initialize(leader:, term:, previous:, committed:)
+      ConsensusMachines.__send__(:check, :__append_request, leader, term, previous, committed)
+      super
+    end
+  end
 
   # AppendResponse#append when the log agrees with the leader's up to `index`.
-  Matched = Data.define(:index)
+  Matched = Data.define(:index) do
+    def initialize(index:)
+      ConsensusMachines.__send__(:check, :__matched, index)
+      super
+    end
+  end
+
+  # The reply to an AppendEntries. `append` is a Matched, :conflict or
+  # :term_behind. The core's `AppendResponse::new`: a positive term, above
+  # one for :term_behind.
+  AppendResponse = Data.define(:term, :append) do
+    def initialize(term:, append:)
+      ConsensusMachines.__send__(:check, :__append_response, term, append)
+      super
+    end
+  end
 
   # What an honoured inbound message did, in two stages. `adopted` is the
   # higher term this call moved the server into (vote cleared, now a
   # follower), or nil when the term was kept. `role` is the role after the
-  # call. `outcome` is what the message itself came to.
-  Received = Data.define(:adopted, :role, :outcome)
-
-  # A server's durable state, as plain data to persist however you like.
-  # `entries` is an Array of Entry.
-  Checkpoint = Data.define(:members, :own, :term, :voted_for, :committed, :entries)
-
-  # Shape checks shared by the class and instance methods.
-  module Shape
-    module_function
-
-    def expect(value, type)
-      return value if value.is_a?(type)
-
-      raise TypeError, "expected a #{type}"
-    end
-
-    # Entries as `term, command, term, command, ...` for the native call.
-    def flatten(entries)
-      expect(entries, Array).flat_map do |entry|
-        expect(entry, Entry)
-        [entry.term, entry.command]
-      end
+  # call. `outcome` is what the message itself came to. The core's
+  # `Received::new`: only an answer a server can give exists.
+  Received = Data.define(:adopted, :role, :outcome) do
+    def initialize(adopted:, role:, outcome:)
+      ConsensusMachines.__send__(:check, :__received, adopted, role, outcome)
+      super
     end
   end
-  private_constant :Shape
 
-  class Raft
-    class << self
-      # The server `members[own]` as `checkpoint` left it, as a follower. The
-      # membership and seat are stated, never read out of the checkpoint:
-      # ArgumentError when it belongs to another membership or seat, or is not
-      # a state a server can be in.
-      def restored(members, own, checkpoint)
-        saved = Shape.expect(checkpoint, Checkpoint)
-        fields = [saved.members, saved.own, saved.term, saved.voted_for, saved.committed]
-        native_restored(members, own, fields << Shape.flatten(saved.entries))
-      end
+  # A server's durable state, as plain data to persist however you like.
+  # `entries` is an Array of Entry. The core's `Checkpoint::new`, for
+  # Raft::MEMBERS members and at most Raft::CAPACITY entries; both Arrays are stored as frozen copies.
+  Checkpoint = Data.define(:members, :own, :term, :voted_for, :committed, :entries) do
+    def initialize(members:, own:, term:, voted_for:, committed:, entries:)
+      raise TypeError, "members must be an Array, not #{members.class}" unless members.is_a?(Array)
+      raise TypeError, "entries must be an Array, not #{entries.class}" unless entries.is_a?(Array)
 
-      private :native_restored
+      members = members.dup.freeze
+      entries = entries.dup.freeze
+      ConsensusMachines.__send__(:check, :__checkpoint, members, own, term, voted_for, committed, entries)
+      super
     end
+  end
 
+  # Sealed: no subclass can skip the checks above by overriding `initialize`,
+  # and no bare `allocate` builds a value that never ran them. Ruby still
+  # binds a subclass constant before `inherited` raises; the native side
+  # refuses its instances.
+  [Position, Entry, VoteRequest, Denied, VoteResponse, AppendRequest, Matched, AppendResponse, Received,
+   Checkpoint].each do |value|
+    value.singleton_class.undef_method(:allocate)
+    value.define_singleton_method(:inherited) { |_| raise TypeError, "#{value} cannot be subclassed" }
+  end
+end
+
+# Native is required: no algorithm fallback. It resolves the classes above
+# once, here.
+require 'consensus_machines_native/consensus_machines_native'
+
+module ConsensusMachines
+  hooks = %i[__position __entry __vote_request __denied __vote_response __append_request __matched
+             __append_response __received __checkpoint]
+  private_class_method(*hooks)
+
+  # The core's `Raft`, for 1..9 members and a log of CAPACITY entries.
+  # `begin_election`, `request_vote`, `receive_vote`, `append_entries` and
+  # `acknowledge` read every message from exactly this gem's class, decide on
+  # a copy, build the answer (its `new` runs), then keep the copy only if
+  # this server is still unfrozen (FrozenError) and unchanged (RuntimeError:
+  # a re-entrant call changed it). Either way, a raise means nothing was
+  # applied. A refusal is a Symbol.
+  class Raft
     def last = Position.new(*native_last)
 
     def entry(index)
@@ -91,59 +156,7 @@ module ConsensusMachines
     def checkpoint
       members, own, term, voted_for, committed, log = native_checkpoint
       entries = log.each_slice(2).map { |pair| Entry.new(*pair) }
-      Checkpoint.new(members.freeze, own, term, voted_for, committed, entries.freeze)
-    end
-
-    def begin_election
-      request = native_begin_election
-      return request if request.is_a?(Symbol)
-
-      candidate, term, *last = request
-      VoteRequest.new(candidate, term, Position.new(*last))
-    end
-
-    def request_vote(request)
-      expect(request, VoteRequest)
-      last = expect(request.last, Position)
-      received(native_request_vote(request.candidate, request.term, [last.index, last.term])) do |term, vote, reason|
-        VoteResponse.new(term, reason ? Denied.new(reason) : vote)
-      end
-    end
-
-    def receive_vote(peer, response)
-      vote = expect(response, VoteResponse).vote
-      fields = vote.is_a?(Denied) ? [:denied, vote.reason] : [vote, nil]
-      received(native_receive_vote(peer, response.term, fields))
-    end
-
-    def append_entries(request, entries)
-      expect(request, AppendRequest)
-      previous = expect(request.previous, Position)
-      log = Shape.flatten(entries)
-      answer = native_append_entries([request.leader, request.term], [previous.index, previous.term],
-                                     request.committed, log)
-      received(answer) do |term, append, index|
-        AppendResponse.new(term, index ? Matched.new(index) : append)
-      end
-    end
-
-    def acknowledge(peer, response)
-      append = expect(response, AppendResponse).append
-      fields = append.is_a?(Matched) ? [:matched, append.index] : [append, nil]
-      received(native_acknowledge(peer, response.term, fields))
-    end
-
-    private
-
-    def expect(value, type) = Shape.expect(value, type)
-
-    # A refusal symbol as it is; an honoured answer as a Received whose
-    # outcome the block rebuilds from the native fields.
-    def received(answer)
-      return answer if answer.is_a?(Symbol)
-
-      adopted, role, outcome = answer
-      Received.new(adopted, role, block_given? ? yield(*outcome) : outcome)
+      Checkpoint.new(members, own, term, voted_for, committed, entries)
     end
   end
 end

@@ -13,6 +13,8 @@ Command payloads are immutable caller-defined `u64` command identities.
 Indices are one-based (`0/term 0` is the empty-log sentinel). Peer indices refer
 to one validated static membership. No dynamic membership or joint consensus.
 A full fixed-size log refuses proposals; no compaction/snapshot installation yet.
+`Raft<N, L>` holds exactly `N` members (`Raft::MEMBERS`) and at most `L` log
+entries (`Raft::CAPACITY`).
 
 ## Contract
 
@@ -33,12 +35,16 @@ A full fixed-size log refuses proposals; no compaction/snapshot installation yet
      independent of stage one: a vote can be denied, or an append conflict,
      after the term was adopted. That adoption is an honoured effect the
      caller must persist; it is never part of a refusal.
-- **Protocol answers are not refusals.** A denied vote and a rejected append
-  are replies Raft defines and the sender needs: `Vote::Denied(Denial)`,
-  `Append::Conflict`, `Append::TermBehind`. They are honoured outcomes of a
-  well-formed request, and each reply carries the responder's term.
-  A refusal is for a call that is malformed or impossible on this server:
-  nothing is sent back for it.
+- **Protocol replies are outcomes** (the fleet rule of that name in
+  `CONVENTIONS.md`: the one place an `Ok` payload may say "no"). A denied
+  vote and a rejected append are replies Raft defines and the sender needs:
+  `Vote::Denied(Denial)`, `Append::Conflict`, `Append::TermBehind`. They are
+  honoured outcomes of a well-formed request, and each reply carries the
+  responder's term. Folding such a reply in is honoured too:
+  `Ballot::Denied` and `Ack::Conflict` record that the reply arrived and
+  change nothing. A refusal is for a call that is malformed or impossible on
+  this server: nothing is sent back for it. `Append::Conflict` carries no
+  back-off hint; the leader's retry position is the runtime's.
 - **`Mismatch` and `CommittedConflict` are an operator signal, not a protocol
   answer.** An append whose entries contradict this server's log under the
   same `(index, term)` (`Mismatch`) or would replace an entry at or below its
@@ -77,8 +83,30 @@ A full fixed-size log refuses proposals; no compaction/snapshot installation yet
   are volatile: a restored server is a follower. Whether a checkpoint is the
   *newest* one of its server is the caller's persistence contract; restoring
   an older one can forget a vote, and the model cannot detect it.
+- **Values are valid or are built by hand.** The message and log structs keep
+  public fields for reading and matching, and each has a validating
+  constructor that is the one definition of a value a server can send:
+  `Position::new` (index and term both zero or both set), `Entry::new`
+  (positive term), `VoteRequest::new` and `AppendRequest::new` (positive
+  term, not below the position's), `VoteResponse::new` and
+  `AppendResponse::new` (positive term, above one for a `TermBehind`
+  reply), and `Received::new` (an adopted term is the reply's, never zero,
+  and leaves a follower; the outcome can follow that role, judged by the
+  `Outcome` trait each outcome type implements). Each answers `None`
+  otherwise. Inbound requests and replies are judged by these same
+  constructors (`Malformed`), a reply before its term is looked at, so an
+  impossible reply never moves the server into its term; and every answer the server gives passes them; the
+  randomized test checks it on every honoured call. A binding builds its
+  values through them.
+- **No unreachable arms.** No `panic!`, `assert!`, `unreachable!` or
+  `expect`. The log stores entries densely, so committing walks a slice and
+  cannot meet a missing entry. One arm remains that the types demand: the
+  quorum tracker's `UnknownMember` when counting a seat already checked
+  against the membership. It is a `debug_assert!(false, ..)` answered as
+  `Refusal::UnknownMember` before anything changed.
 - **No time.** Terms and indices are logical. Election timeouts and
-  heartbeats are the runtime's.
+  heartbeats are the runtime's. No call takes or records a clock, so no
+  answer depends on an instant.
 - **Exhaustive.** No enum is `#[non_exhaustive]`; a new variant is a breaking
   change every caller handles.
 
@@ -87,14 +115,14 @@ A full fixed-size log refuses proposals; no compaction/snapshot installation yet
 Checks run in the order listed. Every refusal is decided before stage one, so
 none of them adopts a term. "Stale request" is `term < own term`.
 
-| Call | Refusals, before any change | Stage 1: term | Stage 2: honoured outcome |
-| --- | --- | --- | --- |
-| `begin_election()` | `TermExhausted` | issues `term + 1`, votes for itself | `VoteRequest`; a single member leads at once |
-| `request_vote(request)` | `UnknownMember`, `OwnSeat` (candidate); `Malformed` (zero term, `last` impossible in that term) | stale: kept. higher: adopted | `Vote::Granted`; `Vote::Duplicate` (repeat from the candidate already voted for); `Vote::Denied(TermBehind)` (stale, nothing changed); `Vote::Denied(AlreadyVoted)`; `Vote::Denied(LogBehind)` |
-| `receive_vote(peer, response)` | `UnknownMember`, `OwnSeat` (peer); `Stale` (lower term, or `Denied(TermBehind)` not from a higher one); `NotCandidate` (current term, follower) | higher: adopted | `Ballot::Counted`; `Ballot::Elected`; `Ballot::Duplicate` (repeat); `Ballot::Denied`; `Ballot::Overtaken` (exactly when adopted) |
-| `propose(command)` | `NotLeader`, `LogFull` | none | the new index |
-| `append_entries(request, entries)` | `UnknownMember`, `OwnSeat` (leader); `Malformed` (zero term, `previous` or an entry impossible in that term, entry terms decreasing); `TooManyEntries`; then, unless stale: `RivalLeader` (same term as the one this server leads), `Mismatch`, `CommittedConflict` | stale: kept. higher: adopted. same term: a candidate becomes a follower | `Append::Matched(index)` (also the repeat: entries already held); `Append::Conflict` (log unchanged); `Append::TermBehind` (stale, nothing changed) |
-| `acknowledge(peer, response)` | `UnknownMember`, `OwnSeat` (peer); `Stale` (lower term, or `TermBehind` not from a higher one); `NotLeader` (current term, not leading); `BeyondLog` | higher: adopted | `Ack::Advanced`; `Ack::Duplicate` (repeat: at or below the recorded match); `Ack::Conflict` (nothing changed); `Ack::Overtaken` (exactly when adopted) |
+| Call | Refusals, before any change | Stage 1: term | Stage 2: honoured outcome | Records the clock |
+| --- | --- | --- | --- | --- |
+| `begin_election()` | `TermExhausted` | issues `term + 1`, votes for itself | `VoteRequest`; a single member leads at once | no |
+| `request_vote(request)` | `UnknownMember`, `OwnSeat` (candidate); `Malformed` (fails `VoteRequest::new`) | stale: kept. higher: adopted | `Vote::Granted`; `Vote::Duplicate` (repeat from the candidate already voted for); `Vote::Denied(TermBehind)` (stale, nothing changed); `Vote::Denied(AlreadyVoted)`; `Vote::Denied(LogBehind)` | no |
+| `receive_vote(peer, response)` | `UnknownMember`, `OwnSeat` (peer); `Malformed` (fails `VoteResponse::new`, judged before the term); `Stale` (lower term, or `Denied(TermBehind)` not from a higher one); `NotCandidate` (current term, follower) | higher: adopted | `Ballot::Counted`; `Ballot::Elected`; `Ballot::Duplicate` (repeat); `Ballot::Denied`; `Ballot::Overtaken` (exactly when adopted) | no |
+| `propose(command)` | `NotLeader`, `LogFull` | none | the new index | no |
+| `append_entries(request, entries)` | `UnknownMember`, `OwnSeat` (leader); `Malformed` (fails `AppendRequest::new`, an entry fails `Entry::new`, is above the request's term, or entry terms decrease); `TooManyEntries`; then, unless stale: `RivalLeader` (same term as the one this server leads), `Mismatch`, `CommittedConflict` | stale: kept. higher: adopted. same term: a candidate becomes a follower | `Append::Matched(index)` (also the repeat: entries already held); `Append::Conflict` (log unchanged); `Append::TermBehind` (stale, nothing changed) | no |
+| `acknowledge(peer, response)` | `UnknownMember`, `OwnSeat` (peer); `Malformed` (fails `AppendResponse::new`, judged before the term); `Stale` (lower term, or `TermBehind` not from a higher one); `NotLeader` (current term, not leading); `BeyondLog` | higher: adopted | `Ack::Advanced`; `Ack::Duplicate` (repeat: at or below the recorded match); `Ack::Conflict` (nothing changed); `Ack::Overtaken` (exactly when adopted) | no |
 
 `Raft::new` and `Raft::restored` answer `Option`; `checkpoint`, `members`,
 `own`, `role`, `term`, `committed`, `last` and `entry` are pure reads.

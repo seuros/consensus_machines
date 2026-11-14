@@ -7,34 +7,13 @@ const HIGH: u64 = 9;
 #[test]
 fn request_vote_refusals_change_nothing_and_adopt_no_term() {
     let mut voter = node::<4>(1);
-    let ask = |candidate, term, last| VoteRequest {
-        candidate,
-        term,
-        last,
-    };
     let cases = [
         (Refusal::UnknownMember, ask(3, HIGH, EMPTY)),
         (Refusal::OwnSeat, ask(1, HIGH, EMPTY)),
         (Refusal::Malformed, ask(0, 0, EMPTY)),
-        (
-            Refusal::Malformed,
-            ask(0, HIGH, Position { index: 0, term: 1 }),
-        ),
-        (
-            Refusal::Malformed,
-            ask(0, HIGH, Position { index: 1, term: 0 }),
-        ),
-        (
-            Refusal::Malformed,
-            ask(
-                0,
-                HIGH,
-                Position {
-                    index: 1,
-                    term: HIGH + 1,
-                },
-            ),
-        ),
+        (Refusal::Malformed, ask(0, HIGH, at(0, 1))),
+        (Refusal::Malformed, ask(0, HIGH, at(1, 0))),
+        (Refusal::Malformed, ask(0, HIGH, at(1, HIGH + 1))),
     ];
     for (why, request) in cases {
         refused(&mut voter, why, |voter| voter.request_vote(request));
@@ -46,9 +25,6 @@ fn request_vote_refusals_change_nothing_and_adopt_no_term() {
 fn receive_vote_refusals_change_nothing_and_adopt_no_term() {
     let grant = |term| ballot(term, Vote::Granted);
     let mut candidate = node::<4>(0);
-    refused(&mut candidate, Refusal::NotCandidate, |node| {
-        node.receive_vote(1, grant(0))
-    });
     candidate.begin_election().expect("term");
     candidate.begin_election().expect("term");
     refused(&mut candidate, Refusal::UnknownMember, |node| {
@@ -80,6 +56,7 @@ fn propose_refusals_change_nothing() {
     follower.begin_election().expect("term");
     refused(&mut follower, Refusal::NotLeader, |node| node.propose(1));
     let mut leader = leader::<1>();
+    assert_eq!((Raft::<3, 1>::MEMBERS, Raft::<3, 1>::CAPACITY), (3, 1));
     assert_eq!(leader.propose(1), Ok(1));
     refused(&mut leader, Refusal::LogFull, |node| node.propose(2));
 }
@@ -87,7 +64,7 @@ fn propose_refusals_change_nothing() {
 #[test]
 fn append_entries_refusals_change_nothing_and_adopt_no_term() {
     let mut follower = node::<2>(1);
-    let first = Position { index: 1, term: 1 };
+    let first = at(1, 1);
     let stored = follower
         .append_entries(append(0, 1, EMPTY, 1), &[entry(1, 7)])
         .expect("append");
@@ -96,29 +73,9 @@ fn append_entries_refusals_change_nothing_and_adopt_no_term() {
         (Refusal::UnknownMember, append(3, HIGH, EMPTY, 0), &[]),
         (Refusal::OwnSeat, append(1, HIGH, EMPTY, 0), &[]),
         (Refusal::Malformed, append(0, 0, EMPTY, 0), &[]),
-        (
-            Refusal::Malformed,
-            append(0, HIGH, Position { index: 0, term: 1 }, 0),
-            &[],
-        ),
-        (
-            Refusal::Malformed,
-            append(0, HIGH, Position { index: 1, term: 0 }, 0),
-            &[],
-        ),
-        (
-            Refusal::Malformed,
-            append(
-                0,
-                HIGH,
-                Position {
-                    index: 1,
-                    term: HIGH + 1,
-                },
-                0,
-            ),
-            &[],
-        ),
+        (Refusal::Malformed, append(0, HIGH, at(0, 1), 0), &[]),
+        (Refusal::Malformed, append(0, HIGH, at(1, 0), 0), &[]),
+        (Refusal::Malformed, append(0, HIGH, at(1, HIGH + 1), 0), &[]),
         (
             Refusal::Malformed,
             append(0, HIGH, EMPTY, 0),
@@ -153,10 +110,7 @@ fn append_entries_refusals_change_nothing_and_adopt_no_term() {
     }
     assert_eq!(follower.term(), 1);
     refused(&mut follower, Refusal::TooManyEntries, |node| {
-        let far = Position {
-            index: usize::MAX,
-            term: 1,
-        };
+        let far = at(usize::MAX, 1);
         node.append_entries(append(0, 1, far, 0), &[entry(1, 1)])
     });
     let mut leader = leader::<2>();
@@ -188,13 +142,48 @@ fn acknowledge_refusals_change_nothing_and_adopt_no_term() {
     }
     assert_eq!((leader.term(), leader.committed()), (2, 0));
     let mut follower = node::<4>(1);
-    refused(&mut follower, Refusal::NotLeader, |node| {
-        node.acknowledge(0, matched(0, 0))
-    });
     follower.begin_election().expect("term");
     refused(&mut follower, Refusal::NotLeader, |node| {
         node.acknowledge(0, matched(1, 0))
     });
+}
+
+/// Regression: an inbound reply its own constructor rejects (term zero, or a
+/// "term behind" from a term no request could be behind) was folded in, and a
+/// higher impossible term was adopted. It is `Malformed`, before any term
+/// reconciliation, whatever the receiver's role and term.
+#[test]
+fn impossible_replies_are_malformed_and_adopt_no_term() {
+    let votes = [
+        ballot(0, Vote::Granted),
+        ballot(0, Vote::Denied(Denial::AlreadyVoted)),
+        ballot(1, Vote::Denied(Denial::TermBehind)),
+    ];
+    let appends = [
+        matched(0, 0),
+        AppendResponse {
+            term: 0,
+            append: Append::Conflict,
+        },
+        AppendResponse {
+            term: 1,
+            append: Append::TermBehind,
+        },
+    ];
+    let mut candidate = node::<4>(0);
+    candidate.begin_election().expect("term");
+    for mut server in [node::<4>(0), candidate, leader::<4>()] {
+        for response in votes {
+            refused(&mut server, Refusal::Malformed, |node| {
+                node.receive_vote(1, response)
+            });
+        }
+        for response in appends {
+            refused(&mut server, Refusal::Malformed, |node| {
+                node.acknowledge(1, response)
+            });
+        }
+    }
 }
 
 #[test]

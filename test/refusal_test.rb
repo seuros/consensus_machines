@@ -17,19 +17,19 @@ class RefusalTest < Minitest::Test
     voter = node(3, 1)
     {
       VoteRequest.new(3, HIGH, EMPTY) => :unknown_member,
-      VoteRequest.new(1, HIGH, EMPTY) => :own_seat,
-      VoteRequest.new(0, 0, EMPTY) => :malformed,
-      VoteRequest.new(0, HIGH, Position.new(0, 1)) => :malformed,
-      VoteRequest.new(0, HIGH, Position.new(1, 0)) => :malformed,
-      VoteRequest.new(0, HIGH, Position.new(1, HIGH + 1)) => :malformed
+      VoteRequest.new(1, HIGH, EMPTY) => :own_seat
     }.each { |request, refusal| assert_refused(refusal, voter) { it.request_vote(request) } }
     assert_equal 0, voter.term
+    # The core answers :malformed to such a request; from Ruby it cannot be built.
+    assert_raises(RangeError) { VoteRequest.new(0, 0, EMPTY) }
+    assert_raises(RangeError) { VoteRequest.new(0, HIGH, Position.new(HIGH + 1, HIGH + 1)) }
   end
 
   def test_receive_vote_refusals
     raft = node
-    assert_refused(:not_candidate, raft) { it.receive_vote(1, granted(0)) }
-    2.times { raft.begin_election }
+    raft.request_vote(VoteRequest.new(2, 1, EMPTY))
+    assert_refused(:not_candidate, raft) { it.receive_vote(1, granted(1)) }
+    raft.begin_election
     assert_refused(:unknown_member, raft) { it.receive_vote(3, granted(HIGH)) }
     assert_refused(:own_seat, raft) { it.receive_vote(0, granted(HIGH)) }
     assert_refused(:stale, raft) { it.receive_vote(1, granted(1)) }
@@ -51,9 +51,6 @@ class RefusalTest < Minitest::Test
     [
       [:unknown_member, AppendRequest.new(3, HIGH, EMPTY, 0), []],
       [:own_seat, AppendRequest.new(1, HIGH, EMPTY, 0), []],
-      [:malformed, AppendRequest.new(0, 0, EMPTY, 0), []],
-      [:malformed, AppendRequest.new(0, HIGH, Position.new(0, 1), 0), []],
-      [:malformed, high, [Entry.new(0, 1)]],
       [:malformed, high, [Entry.new(HIGH + 1, 1)]],
       [:malformed, high, [Entry.new(2, 1), Entry.new(1, 2)]],
       [:too_many_entries, high, Array.new(65) { Entry.new(HIGH, it) }],
@@ -64,6 +61,8 @@ class RefusalTest < Minitest::Test
       assert_refused(refusal, follower) { it.append_entries(request, entries) }
     end
     assert_equal 1, follower.term
+    assert_raises(RangeError) { AppendRequest.new(0, 0, EMPTY, 0) }
+    assert_raises(RangeError) { AppendRequest.new(0, 1, Position.new(1, 2), 0) }
     assert_refused(:rival_leader, leader) { it.append_entries(AppendRequest.new(1, 1, EMPTY, 0), []) }
   end
 
@@ -80,7 +79,8 @@ class RefusalTest < Minitest::Test
     assert_refused(:beyond_log, raft) { it.acknowledge(1, matched(2, 2)) }
     assert_equal [2, 0], [raft.term, raft.committed]
     follower = node(3, 1)
-    assert_refused(:not_leader, follower) { it.acknowledge(0, matched(0, 0)) }
+    follower.request_vote(VoteRequest.new(2, 1, EMPTY))
+    assert_refused(:not_leader, follower) { it.acknowledge(0, matched(1, 0)) }
   end
 
   def test_malformed_ruby_input_raises_before_any_transition
@@ -95,16 +95,16 @@ class RefusalTest < Minitest::Test
     assert_raises(TypeError) { raft.receive_vote(1, [1, :granted]) }
     assert_raises(TypeError) { raft.receive_vote(1, VoteResponse.new(1, 1)) }
     assert_raises(TypeError) { raft.receive_vote(1, VoteResponse.new(1, true)) }
-    assert_raises(ArgumentError) { raft.receive_vote(1, VoteResponse.new(1, :maybe)) }
-    assert_raises(ArgumentError) { raft.receive_vote(1, VoteResponse.new(1, Denied.new(:mood))) }
+    assert_raises(RangeError) { raft.receive_vote(1, VoteResponse.new(1, :maybe)) }
+    assert_raises(RangeError) { raft.receive_vote(1, VoteResponse.new(1, Denied.new(:mood))) }
     request = AppendRequest.new(1, 10, EMPTY, 0)
     assert_raises(TypeError) { raft.append_entries(request, nil) }
     assert_raises(TypeError) { raft.append_entries(request, [[10, 1]]) }
     assert_raises(TypeError) { raft.append_entries(request, [Entry.new(10, 1), Entry.new(10, 'bad')]) }
     assert_raises(TypeError) { raft.append_entries(AppendRequest.new(1, 10, [0, 0], 0), []) }
     assert_raises(TypeError) { raft.acknowledge(1, [1, 1]) }
-    assert_raises(ArgumentError) { raft.acknowledge(1, AppendResponse.new(10, :matched)) }
-    assert_raises(ArgumentError) { raft.acknowledge(1, AppendResponse.new(10, :perhaps)) }
+    assert_raises(RangeError) { raft.acknowledge(1, AppendResponse.new(10, :matched)) }
+    assert_raises(RangeError) { raft.acknowledge(1, AppendResponse.new(10, :perhaps)) }
     assert_raises(TypeError) { raft.acknowledge(1, AppendResponse.new(10, Matched.new('1'))) }
     assert_raises(TypeError) { raft.entry('1') }
     assert_equal [saved, :leader], [raft.checkpoint, raft.role]

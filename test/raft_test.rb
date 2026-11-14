@@ -4,7 +4,9 @@ class RaftTest < Minitest::Test
   include RaftHelpers
 
   def test_exact_membership_majority_for_every_supported_size
-    (1..9).each do |count|
+    assert_equal 1..9, Raft::MEMBERS
+    assert_predicate Raft::MEMBERS, :frozen?
+    Raft::MEMBERS.each do |count|
       raft = node(count)
       assert_equal VoteRequest.new(0, 1, EMPTY), raft.begin_election
       majority = count / 2 + 1
@@ -80,8 +82,7 @@ class RaftTest < Minitest::Test
     assert_equal Entry.new(1, 99), follower.entry(1)
     replay = assert_unchanged(follower) { it.append_entries(request, [lead.entry(1)]) }
     assert_equal Received.new(nil, :follower, matched(1, 1)), replay
-    wrong = AppendRequest.new(0, 1, Position.new(1, 2), 0)
-    assert_equal :malformed, follower.append_entries(wrong, [])
+    assert_refused(:malformed, follower) { it.append_entries(request, [Entry.new(2, 1)]) }
     missing = AppendRequest.new(0, 1, Position.new(2, 1), 0)
     conflict = assert_unchanged(follower) { it.append_entries(missing, []) }
     assert_equal AppendResponse.new(1, :conflict), conflict.outcome
@@ -104,17 +105,19 @@ class RaftTest < Minitest::Test
     assert_equal 4, lead.term
   end
 
-  def test_bounded_log_holds_sixty_four_entries
+  def test_bounded_log_holds_capacity_entries
+    capacity = Raft::CAPACITY
+    assert_equal 64, capacity
     raft = node(1)
     raft.begin_election
     assert_equal :leader, raft.role
-    64.times { |i| assert_equal i + 1, raft.propose(i) }
-    assert_refused(:log_full, raft) { it.propose(65) }
-    assert_nil raft.entry(65)
-    assert_equal 64, raft.committed
+    capacity.times { |i| assert_equal i + 1, raft.propose(i) }
+    assert_refused(:log_full, raft) { it.propose(capacity + 1) }
+    assert_nil raft.entry(capacity + 1)
+    assert_equal capacity, raft.committed
     follower = node(3, 1)
-    entries = Array.new(64) { Entry.new(1, it) }
-    assert_equal matched(1, 64), follower.append_entries(AppendRequest.new(0, 1, EMPTY, 0), entries).outcome
-    assert_equal Position.new(64, 1), follower.last
+    entries = Array.new(capacity) { Entry.new(1, it) }
+    assert_equal matched(1, capacity), follower.append_entries(AppendRequest.new(0, 1, EMPTY, 0), entries).outcome
+    assert_equal Position.new(capacity, 1), follower.last
   end
 end

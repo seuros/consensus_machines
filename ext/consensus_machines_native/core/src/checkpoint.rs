@@ -20,7 +20,8 @@ impl<const N: usize, const L: usize> Checkpoint<N, L> {
     /// Rebuild persisted state.
     ///
     /// `None` unless it is a state a server can be in: distinct members, `own`
-    /// and `voted_for` seats of the membership, at most `L` entries whose
+    /// and `voted_for` seats of the membership, no vote in term zero (every
+    /// vote is cast in an election's term, at least one), at most `L` entries whose
     /// terms are positive, never decrease and never exceed `term`, and
     /// `committed` within the entries.
     #[must_use]
@@ -35,7 +36,10 @@ impl<const N: usize, const L: usize> Checkpoint<N, L> {
         if !distinct(&members) || own >= N || voted_for.is_some_and(|seat| seat >= N) {
             return None;
         }
-        if entries.len() > L || committed > entries.len() {
+        if term == 0 && voted_for.is_some() {
+            return None;
+        }
+        if committed > entries.len() {
             return None;
         }
         let mut log = Log::new();
@@ -45,6 +49,7 @@ impl<const N: usize, const L: usize> Checkpoint<N, L> {
                 return None;
             }
             floor = entry.term;
+            // `None` here is the capacity check: more than `L` entries.
             log.push(*entry)?;
         }
         Some(Self {

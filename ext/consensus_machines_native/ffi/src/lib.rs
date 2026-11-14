@@ -1,66 +1,79 @@
 //! Native Ruby bridge for a bounded Raft model, not a consensus service.
-//! Values cross flattened; `lib/consensus_machines.rb` rebuilds the `Data`.
+//! Every message is read from exactly this gem's `Data` class through the
+//! core's validating constructor; every answer of a mutating call is built
+//! while the decision is held on a copy (clone-then-keep).
+mod build;
+mod classes;
+mod hooks;
 mod init;
 mod model;
 mod names;
+mod read;
 mod values;
 use std::cell::RefCell;
 
-use consensus_machines::{
-    AppendRequest, AppendResponse, Entry, Position, Received, Refusal, VoteRequest, VoteResponse,
+use magnus::{
+    Error, IntoValue, RArray, Ruby, Symbol, TryConvert, Value, prelude::*, typed_data::Obj,
 };
-use magnus::{Error, IntoValue, RArray, Ruby, Symbol, Value, prelude::*, typed_data::Obj};
+use model::Node;
+use read::{AppendRequestValue, AppendResponseValue, VoteRequestValue, VoteResponseValue};
 use values::{Id, index, numbers};
 
-/// `[members, own, term, voted_for, committed, entries]`, entries flattened
-/// to `term, command, term, command, ...`.
-type SavedFields = (RArray, Id, Id, Option<Id>, Id, RArray);
+use crate::build::refused;
+use crate::classes::{classes, fields, keep};
+
+/// `[members, own, term, voted_for, committed, entries]`, entries an Array
+/// of `Entry`.
+pub(crate) type SavedFields = (RArray, Id, Id, Option<Id>, Id, RArray);
 
 #[magnus::wrap(class = "ConsensusMachines::Raft", free_immediately, size)]
 struct Wrapper {
-    node: RefCell<Box<dyn model::Model>>,
-}
-
-/// A refusal as its symbol, or an honoured answer as whatever `honoured` builds.
-fn answer<T, V: IntoValue>(
-    ruby: &Ruby,
-    outcome: Result<T, Refusal>,
-    honoured: impl FnOnce(T) -> V,
-) -> Value {
-    match outcome {
-        Ok(value) => honoured(value).into_value_with(ruby),
-        Err(refusal) => ruby.to_symbol(names::refusal(refusal)).as_value(),
-    }
-}
-
-/// The two stages every inbound answer starts with.
-fn stages<T>(ruby: &Ruby, received: &Received<T>) -> (Option<u64>, Symbol) {
-    (received.adopted, ruby.to_symbol(names::role(received.role)))
-}
-
-fn entries(ruby: &Ruby, flat: RArray) -> Result<Vec<Entry>, Error> {
-    let flat = numbers(flat)?;
-    let (pairs, odd) = flat.as_chunks::<2>();
-    if !odd.is_empty() {
-        return Err(Error::new(
-            ruby.exception_arg_error(),
-            "entries must be term, command pairs",
-        ));
-    }
-    Ok(pairs
-        .iter()
-        .map(|&[term, command]| Entry { term, command })
-        .collect())
+    node: RefCell<Node>,
 }
 
 fn membership(ruby: &Ruby, members: RArray) -> Result<Vec<u64>, Error> {
-    if (1..=9).contains(&members.len()) {
+    if model::MEMBERS.contains(&members.len()) {
         numbers(members)
     } else {
+        let (low, high) = (model::MEMBERS.start(), model::MEMBERS.end());
         Err(Error::new(
-            ruby.exception_arg_error(),
-            "membership must contain 1..9 members",
+            ruby.exception_range_error(),
+            format!("membership must contain {low}..{high} members"),
         ))
+    }
+}
+
+/// A checkpoint's fields as the core's, every conversion done.
+pub(crate) fn saved(ruby: &Ruby, fields: SavedFields) -> Result<model::Saved, Error> {
+    let (members, own, term, voted_for, committed, log) = fields;
+    Ok(model::Saved {
+        members: membership(ruby, members)?,
+        own: index(ruby, own)?,
+        term: term.0,
+        voted_for: voted_for.map(|seat| index(ruby, seat)).transpose()?,
+        committed: index(ruby, committed)?,
+        entries: read::entries(ruby, log)?,
+    })
+}
+
+/// A `Checkpoint` argument: exactly this gem's, its fields converted.
+struct SavedValue(model::Saved);
+
+impl TryConvert for SavedValue {
+    fn try_convert(value: Value) -> Result<Self, Error> {
+        let ruby = Ruby::get_with(value);
+        let [members, own, term, voted_for, committed, entries] =
+            fields(&ruby, value, classes(&ruby)?.checkpoint)?;
+        let voted_for = Option::<Id>::try_convert(voted_for)?;
+        let row = (
+            RArray::try_convert(members)?,
+            Id::try_convert(own)?,
+            Id::try_convert(term)?,
+            voted_for,
+            Id::try_convert(committed)?,
+            RArray::try_convert(entries)?,
+        );
+        saved(&ruby, row).map(Self)
     }
 }
 
@@ -69,171 +82,163 @@ impl Wrapper {
         let members = membership(ruby, members)?;
         let node = model::build(&members, index(ruby, own)?, None).ok_or_else(|| {
             Error::new(
-                ruby.exception_arg_error(),
+                ruby.exception_range_error(),
                 "members must be unique and own index must be in membership",
             )
         })?;
         Ok(Self {
-            node: RefCell::new(node),
+            node: RefCell::new(Node(node)),
         })
     }
-    fn restored(ruby: &Ruby, members: RArray, own: Id, saved: SavedFields) -> Result<Self, Error> {
+    fn restored(ruby: &Ruby, members: RArray, own: Id, saved: SavedValue) -> Result<Self, Error> {
+        let SavedValue(saved) = saved;
         let members = membership(ruby, members)?;
-        let (saved_members, saved_own, term, voted_for, committed, log) = saved;
-        let saved = model::Saved {
-            members: numbers(saved_members)?,
-            own: index(ruby, saved_own)?,
-            term: term.0,
-            voted_for: voted_for.map(|seat| index(ruby, seat)).transpose()?,
-            committed: index(ruby, committed)?,
-            entries: entries(ruby, log)?,
-        };
-        let node = model::build(&members, index(ruby, own)?, Some(&saved)).ok_or_else(|| {
+        let own = index(ruby, own)?;
+        let node = model::build(&members, own, Some(&saved)).ok_or_else(|| {
             Error::new(
-                ruby.exception_arg_error(),
+                ruby.exception_range_error(),
                 "not a checkpoint of this membership and seat",
             )
         })?;
         Ok(Self {
-            node: RefCell::new(node),
+            node: RefCell::new(Node(node)),
         })
     }
     fn members(&self) -> Vec<u64> {
-        self.node.borrow().members()
+        self.node.borrow().0.members()
     }
     fn own(&self) -> usize {
-        self.node.borrow().own()
+        self.node.borrow().0.own()
     }
     fn role(ruby: &Ruby, rb_self: &Self) -> Symbol {
-        ruby.to_symbol(names::role(rb_self.node.borrow().role()))
+        ruby.to_symbol(names::role(rb_self.node.borrow().0.role()))
     }
     fn term(&self) -> u64 {
-        self.node.borrow().term()
+        self.node.borrow().0.term()
     }
     fn committed(&self) -> usize {
-        self.node.borrow().committed()
+        self.node.borrow().0.committed()
     }
     fn last(&self) -> (usize, u64) {
-        let last = self.node.borrow().last();
+        let last = self.node.borrow().0.last();
         (last.index, last.term)
     }
     fn entry(ruby: &Ruby, rb_self: &Self, position: Id) -> Result<Option<(u64, u64)>, Error> {
-        let entry = rb_self.node.borrow().entry(index(ruby, position)?);
+        let entry = rb_self.node.borrow().0.entry(index(ruby, position)?);
         Ok(entry.map(|entry| (entry.term, entry.command)))
     }
     fn begin_election(ruby: &Ruby, rb_self: Obj<Self>) -> Result<Value, Error> {
-        rb_self.check_frozen()?;
-        let outcome = rb_self.node.borrow_mut().begin_election();
-        Ok(answer(ruby, outcome, |request| {
-            (
-                request.candidate,
-                request.term,
-                request.last.index,
-                request.last.term,
-            )
-        }))
+        let classes = classes(ruby)?;
+        let decide = |node: &mut Node| node.0.begin_election();
+        keep(
+            ruby,
+            rb_self,
+            &rb_self.node,
+            decide,
+            |outcome| match outcome {
+                Ok(request) => build::vote_request(ruby, classes, request),
+                Err(refusal) => Ok(refused(ruby, refusal)),
+            },
+        )
     }
     fn request_vote(
         ruby: &Ruby,
         rb_self: Obj<Self>,
-        candidate: Id,
-        term: Id,
-        last: (Id, Id),
+        request: VoteRequestValue,
     ) -> Result<Value, Error> {
-        rb_self.check_frozen()?;
-        let request = VoteRequest {
-            candidate: index(ruby, candidate)?,
-            term: term.0,
-            last: Position {
-                index: index(ruby, last.0)?,
-                term: last.1.0,
+        let classes = classes(ruby)?;
+        let decide = |node: &mut Node| node.0.request_vote(request.0);
+        keep(
+            ruby,
+            rb_self,
+            &rb_self.node,
+            decide,
+            |outcome| match outcome {
+                Ok(received) => {
+                    let response = build::vote_response(ruby, classes, received.outcome)?;
+                    build::received(ruby, classes, &received, response)
+                }
+                Err(refusal) => Ok(refused(ruby, refusal)),
             },
-        };
-        let outcome = rb_self.node.borrow_mut().request_vote(request);
-        Ok(answer(ruby, outcome, |received| {
-            let (adopted, role) = stages(ruby, &received);
-            let (vote, reason) = names::vote(received.outcome.vote);
-            let reason = reason.map(|reason| ruby.to_symbol(reason));
-            let response = (received.outcome.term, ruby.to_symbol(vote), reason);
-            (adopted, role, response)
-        }))
+        )
     }
     fn receive_vote(
         ruby: &Ruby,
         rb_self: Obj<Self>,
         peer: Id,
-        term: Id,
-        vote: (Symbol, Option<Symbol>),
+        response: VoteResponseValue,
     ) -> Result<Value, Error> {
-        rb_self.check_frozen()?;
-        let response = VoteResponse {
-            term: term.0,
-            vote: names::to_vote(ruby, vote.0, vote.1)?,
-        };
-        let peer = index(ruby, peer)?;
-        let outcome = rb_self.node.borrow_mut().receive_vote(peer, response);
-        Ok(answer(ruby, outcome, |received| {
-            let (adopted, role) = stages(ruby, &received);
-            (
-                adopted,
-                role,
-                ruby.to_symbol(names::ballot(received.outcome)),
-            )
-        }))
+        let (classes, peer) = (classes(ruby)?, index(ruby, peer)?);
+        let decide = |node: &mut Node| node.0.receive_vote(peer, response.0);
+        keep(
+            ruby,
+            rb_self,
+            &rb_self.node,
+            decide,
+            |outcome| match outcome {
+                Ok(received) => {
+                    let ballot = ruby.to_symbol(names::ballot(received.outcome)).as_value();
+                    build::received(ruby, classes, &received, ballot)
+                }
+                Err(refusal) => Ok(refused(ruby, refusal)),
+            },
+        )
     }
+    /// Answers an Integer or a Symbol: no Ruby runs, so it decides in place.
     fn propose(ruby: &Ruby, rb_self: Obj<Self>, command: Id) -> Result<Value, Error> {
         rb_self.check_frozen()?;
-        let outcome = rb_self.node.borrow_mut().propose(command.0);
-        Ok(answer(ruby, outcome, |position| position))
+        let outcome = rb_self.node.borrow_mut().0.propose(command.0);
+        Ok(match outcome {
+            Ok(position) => position.into_value_with(ruby),
+            Err(refusal) => refused(ruby, refusal),
+        })
     }
     fn append_entries(
         ruby: &Ruby,
         rb_self: Obj<Self>,
-        leader: (Id, Id),
-        previous: (Id, Id),
-        committed: Id,
+        request: AppendRequestValue,
         log: RArray,
     ) -> Result<Value, Error> {
-        rb_self.check_frozen()?;
-        let request = AppendRequest {
-            leader: index(ruby, leader.0)?,
-            term: leader.1.0,
-            previous: Position {
-                index: index(ruby, previous.0)?,
-                term: previous.1.0,
+        let (classes, log) = (classes(ruby)?, read::entries(ruby, log)?);
+        let decide = |node: &mut Node| node.0.append_entries(request.0, &log);
+        keep(
+            ruby,
+            rb_self,
+            &rb_self.node,
+            decide,
+            |outcome| match outcome {
+                Ok(received) => {
+                    let response = build::append_response(ruby, classes, received.outcome)?;
+                    build::received(ruby, classes, &received, response)
+                }
+                Err(refusal) => Ok(refused(ruby, refusal)),
             },
-            committed: index(ruby, committed)?,
-        };
-        let log = entries(ruby, log)?;
-        let outcome = rb_self.node.borrow_mut().append_entries(request, &log);
-        Ok(answer(ruby, outcome, |received| {
-            let (adopted, role) = stages(ruby, &received);
-            let (append, matched) = names::append(received.outcome.append);
-            let response = (received.outcome.term, ruby.to_symbol(append), matched);
-            (adopted, role, response)
-        }))
+        )
     }
     fn acknowledge(
         ruby: &Ruby,
         rb_self: Obj<Self>,
         peer: Id,
-        term: Id,
-        append: (Symbol, Option<Id>),
+        response: AppendResponseValue,
     ) -> Result<Value, Error> {
-        rb_self.check_frozen()?;
-        let response = AppendResponse {
-            term: term.0,
-            append: names::to_append(ruby, append.0, append.1)?,
-        };
-        let peer = index(ruby, peer)?;
-        let outcome = rb_self.node.borrow_mut().acknowledge(peer, response);
-        Ok(answer(ruby, outcome, |received| {
-            let (adopted, role) = stages(ruby, &received);
-            (adopted, role, ruby.to_symbol(names::ack(received.outcome)))
-        }))
+        let (classes, peer) = (classes(ruby)?, index(ruby, peer)?);
+        let decide = |node: &mut Node| node.0.acknowledge(peer, response.0);
+        keep(
+            ruby,
+            rb_self,
+            &rb_self.node,
+            decide,
+            |outcome| match outcome {
+                Ok(received) => {
+                    let ack = ruby.to_symbol(names::ack(received.outcome)).as_value();
+                    build::received(ruby, classes, &received, ack)
+                }
+                Err(refusal) => Ok(refused(ruby, refusal)),
+            },
+        )
     }
     fn checkpoint(&self) -> (Vec<u64>, usize, u64, Option<usize>, usize, Vec<u64>) {
-        let saved = self.node.borrow().checkpoint();
+        let saved = self.node.borrow().0.checkpoint();
         let log = saved
             .entries
             .iter()

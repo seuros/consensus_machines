@@ -58,11 +58,6 @@ fn a_response_from_a_higher_term_is_adopted_and_reported() {
 #[test]
 fn request_vote_reconciles_the_term_then_answers_the_ballot() {
     let mut voter = node::<4>(1);
-    let ask = |candidate, term, last| VoteRequest {
-        candidate,
-        term,
-        last,
-    };
     // Adopted and granted.
     let granted = voter.request_vote(ask(0, 2, EMPTY)).expect("vote");
     assert_eq!(granted.adopted, Some(2));
@@ -96,7 +91,7 @@ fn request_vote_reconciles_the_term_then_answers_the_ballot() {
     assert_eq!(voter.term(), 5);
     assert_eq!(voter.checkpoint().voted_for(), None);
     // The freed vote goes to a candidate whose log is as up to date.
-    let last = Position { index: 1, term: 2 };
+    let last = at(1, 2);
     let fresh = voter.request_vote(ask(0, 5, last)).expect("vote");
     assert_eq!(fresh.adopted, None);
     assert_eq!(fresh.outcome, ballot(5, Vote::Granted));
@@ -106,11 +101,7 @@ fn request_vote_reconciles_the_term_then_answers_the_ballot() {
 fn a_candidate_adopting_a_higher_term_loses_its_candidacy() {
     let mut candidate = node::<2>(0);
     candidate.begin_election().expect("term");
-    let request = VoteRequest {
-        candidate: 1,
-        term: 3,
-        last: EMPTY,
-    };
+    let request = ask(1, 3, EMPTY);
     let answer = candidate.request_vote(request).expect("vote");
     assert_eq!(answer.adopted, Some(3));
     assert_eq!(answer.role, Role::Follower);
@@ -131,21 +122,14 @@ fn a_candidate_adopting_a_higher_term_loses_its_candidacy() {
 #[test]
 fn persistent_votes_prevent_a_second_vote_after_restart() {
     let mut node = node::<2>(2);
-    let vote = VoteRequest {
-        candidate: 0,
-        term: 1,
-        last: EMPTY,
-    };
+    let vote = ask(0, 1, EMPTY);
     assert_eq!(
         node.request_vote(vote).expect("vote").outcome.vote,
         Vote::Granted
     );
     let mut restored = Raft::restored(MEMBERS, 2, node.checkpoint()).expect("checkpoint");
     assert_eq!(restored.role(), Role::Follower);
-    let other = VoteRequest {
-        candidate: 1,
-        ..vote
-    };
+    let other = ask(1, 1, EMPTY);
     assert_eq!(
         restored.request_vote(other).expect("vote").outcome.vote,
         Vote::Denied(Denial::AlreadyVoted)
@@ -186,12 +170,7 @@ fn all_three_voter_request_orders_preserve_one_majority_per_term_across_restarts
                 let mut granted = [[false; 3]; 3];
                 for (voter, order) in [first, second, third].into_iter().enumerate() {
                     for candidate in order {
-                        let request = VoteRequest {
-                            candidate,
-                            term: 1,
-                            last: EMPTY,
-                        };
-                        match nodes[voter].request_vote(request) {
+                        match nodes[voter].request_vote(ask(candidate, 1, EMPTY)) {
                             Ok(answer) => match answer.outcome.vote {
                                 Vote::Granted | Vote::Duplicate => granted[candidate][voter] = true,
                                 Vote::Denied(_) => {}

@@ -4,12 +4,14 @@
 //! checked for election safety, log matching, leader completeness and
 //! state-machine safety. Every refusal is compared with a clone; every term
 //! adoption with what the answer reported; every message from a term the
-//! receiver has left with the one answer Raft allows it.
+//! receiver has left with the one answer Raft allows it; every forged reply
+//! with a `Malformed` refusal that adopts nothing.
 use std::vec::Vec;
 
 use super::*;
 
 mod deposed;
+mod forged;
 
 const LOG: usize = 10;
 const WIRE: usize = 48;
@@ -37,6 +39,8 @@ struct Tally {
     haunted: usize,
     haunted_committed: usize,
     haunted_inflated: usize,
+    /// Replies no server can send, each refused `Malformed`.
+    forged: usize,
 }
 
 struct Cluster<const N: usize> {
@@ -109,6 +113,12 @@ impl<const N: usize> Cluster<N> {
         }
     }
 
+    /// An honoured repeat: the server equals its clone.
+    fn repeat(tally: &mut Tally, before: &Node<N>, after: &Node<N>) {
+        assert_eq!(after, before, "an honoured repeat changed the server");
+        tally.repeats += 1;
+    }
+
     /// Stage one, checked the same way for all four inbound messages.
     fn reconciled<T>(
         tally: &mut Tally,
@@ -157,10 +167,7 @@ impl<const N: usize> Cluster<N> {
                     assert_eq!(behind, request.term < before.term(), "a stale candidate");
                     match received.outcome.vote {
                         Vote::Granted => self.vote(to, received.outcome.term, request.candidate),
-                        Vote::Duplicate => {
-                            assert_eq!(self.nodes[to], before);
-                            tally.repeats += 1;
-                        }
+                        Vote::Duplicate => Self::repeat(tally, &before, &self.nodes[to]),
                         Vote::Denied(Denial::TermBehind) => assert_eq!(self.nodes[to], before),
                         Vote::Denied(Denial::AlreadyVoted | Denial::LogBehind) => {}
                     }
@@ -173,8 +180,7 @@ impl<const N: usize> Cluster<N> {
                 Self::reconciled(tally, &before, &self.nodes[to], response.term, &answer);
                 match answer.map(|received| received.outcome) {
                     Ok(Ballot::Duplicate | Ballot::Denied) => {
-                        assert_eq!(self.nodes[to], before);
-                        tally.repeats += 1;
+                        Self::repeat(tally, &before, &self.nodes[to]);
                     }
                     Ok(Ballot::Elected) => tally.elections += 1,
                     Ok(Ballot::Counted | Ballot::Overtaken) | Err(_) => {}
@@ -205,8 +211,7 @@ impl<const N: usize> Cluster<N> {
                 Self::reconciled(tally, &before, &self.nodes[to], response.term, &answer);
                 match answer.map(|received| received.outcome) {
                     Ok(Ack::Duplicate | Ack::Conflict) => {
-                        assert_eq!(self.nodes[to], before);
-                        tally.repeats += 1;
+                        Self::repeat(tally, &before, &self.nodes[to]);
                     }
                     Ok(Ack::Advanced | Ack::Overtaken) | Err(_) => {}
                 }
@@ -271,6 +276,7 @@ impl<const N: usize> Cluster<N> {
             }
             25..=59 if self.nodes[seat].role() == Role::Leader => self.replicate(seat),
             60..=69 if !self.deposed.is_empty() => self.haunt(tally),
+            70..=72 => self.forge(tally),
             _ if !self.wire.is_empty() => {
                 let chosen = self.rng.below(self.wire.len());
                 let message = if self.rng.below(6) == 0 {
@@ -370,5 +376,6 @@ fn honest_servers_on_a_hostile_network_keep_every_raft_safety_property() {
         tally.haunted_inflated,
     ];
     assert!(haunted.iter().all(|count| *count > 1_000), "{haunted:?}");
+    assert!(tally.forged > 1_000, "forged: {}", tally.forged);
     assert_eq!(tally.refusals.len(), 4, "refusals: {:?}", tally.refusals);
 }

@@ -3,6 +3,7 @@
 use consensus_machines::{Ack, Append, Ballot, Denial, Refusal, Role, Vote};
 use magnus::{Error, Ruby, Symbol};
 
+use crate::hooks::rejected;
 use crate::values::{Id, index};
 
 pub const fn role(role: Role) -> &'static str {
@@ -76,19 +77,59 @@ pub const fn ack(ack: Ack) -> &'static str {
     }
 }
 
-fn unknown(ruby: &Ruby, what: &'static str) -> Error {
-    Error::new(ruby.exception_arg_error(), what)
+pub fn to_role(ruby: &Ruby, name: Symbol) -> Result<Role, Error> {
+    match &*name.name()? {
+        "follower" => Ok(Role::Follower),
+        "candidate" => Ok(Role::Candidate),
+        "leader" => Ok(Role::Leader),
+        _ => Err(rejected(
+            ruby,
+            "role must be :follower, :candidate or :leader",
+        )),
+    }
+}
+
+pub fn to_denial(ruby: &Ruby, name: Symbol) -> Result<Denial, Error> {
+    match &*name.name()? {
+        "term_behind" => Ok(Denial::TermBehind),
+        "already_voted" => Ok(Denial::AlreadyVoted),
+        "log_behind" => Ok(Denial::LogBehind),
+        _ => Err(rejected(
+            ruby,
+            "reason must be :term_behind, :already_voted or :log_behind",
+        )),
+    }
+}
+
+/// The `Ballot` a symbol names, if it names one.
+pub fn to_ballot(name: &str) -> Option<Ballot> {
+    match name {
+        "counted" => Some(Ballot::Counted),
+        "elected" => Some(Ballot::Elected),
+        "duplicate" => Some(Ballot::Duplicate),
+        "denied" => Some(Ballot::Denied),
+        "overtaken" => Some(Ballot::Overtaken),
+        _ => None,
+    }
+}
+
+/// The `Ack` a symbol names, if it names one.
+pub fn to_ack(name: &str) -> Option<Ack> {
+    match name {
+        "advanced" => Some(Ack::Advanced),
+        "duplicate" => Some(Ack::Duplicate),
+        "conflict" => Some(Ack::Conflict),
+        "overtaken" => Some(Ack::Overtaken),
+        _ => None,
+    }
 }
 
 pub fn to_vote(ruby: &Ruby, name: Symbol, reason: Option<Symbol>) -> Result<Vote, Error> {
-    let reason = reason.map(Symbol::name).transpose()?;
-    match (&*name.name()?, reason.as_deref()) {
+    match (&*name.name()?, reason) {
         ("granted", None) => Ok(Vote::Granted),
         ("duplicate", None) => Ok(Vote::Duplicate),
-        ("denied", Some("term_behind")) => Ok(Vote::Denied(Denial::TermBehind)),
-        ("denied", Some("already_voted")) => Ok(Vote::Denied(Denial::AlreadyVoted)),
-        ("denied", Some("log_behind")) => Ok(Vote::Denied(Denial::LogBehind)),
-        _ => Err(unknown(
+        ("denied", Some(reason)) => Ok(Vote::Denied(to_denial(ruby, reason)?)),
+        _ => Err(rejected(
             ruby,
             "vote must be :granted, :duplicate or a Denied with a known reason",
         )),
@@ -100,7 +141,7 @@ pub fn to_append(ruby: &Ruby, name: Symbol, matched: Option<Id>) -> Result<Appen
         ("matched", Some(position)) => Ok(Append::Matched(index(ruby, position)?)),
         ("conflict", None) => Ok(Append::Conflict),
         ("term_behind", None) => Ok(Append::TermBehind),
-        _ => Err(unknown(
+        _ => Err(rejected(
             ruby,
             "append must be Matched(index), :conflict or :term_behind",
         )),

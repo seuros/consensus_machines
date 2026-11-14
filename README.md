@@ -223,46 +223,55 @@ node.role                     # => :follower
 node.term                     # => 1
 ```
 
-You say which membership and which seat you are restoring. A checkpoint from a different membership or seat raises `ArgumentError`, and so does one no node could ever be in (a vote for a member that doesn't exist, entries from a term the node never reached). What the gem cannot know is whether the checkpoint is the *latest* one. That is your disk's job: restore an old one and the node can forget a vote it already cast.
+You say which membership and which seat you are restoring. A checkpoint from a different membership or seat raises `RangeError`. One no node could ever be in (a vote for a member that doesn't exist, entries from a term the node never reached) never gets that far: `Checkpoint.new` itself raises `RangeError`, because a `Checkpoint` that exists is a state a node can be in. What the gem cannot know is whether the checkpoint is the *latest* one. That is your disk's job: restore an old one and the node can forget a vote it already cast.
 
 ### Every answer
 
 A call that is honoured answers with a value. A call that is not honoured answers with one of the refusal symbols below, and only those, and changes nothing: no term adopted, no vote, no role change, no entry. Each refusal is the snake_case of one core `Refusal` variant; there is no catch-all symbol and refusals never raise. A `:duplicate` is an honoured repeat: what the call asked for already holds, and nothing changed.
 
-| Call | Honoured | Refusals |
-| --- | --- | --- |
-| `begin_election` | `VoteRequest` | `:term_exhausted` |
-| `request_vote(request)` | `Received` of a `VoteResponse` whose `vote` is `:granted`, `:duplicate` (this candidate already has the vote), `Denied(:term_behind)`, `Denied(:already_voted)` or `Denied(:log_behind)` | `:unknown_member`, `:own_seat`, `:malformed` |
-| `receive_vote(peer, response)` | `Received` of `:counted`, `:elected`, `:duplicate` (member already counted), `:denied` or `:overtaken` (term adopted) | `:unknown_member`, `:own_seat`, `:stale`, `:not_candidate` |
-| `propose(command)` | the new index | `:not_leader`, `:log_full` |
-| `append_entries(request, entries)` | `Received` of an `AppendResponse` whose `append` is `Matched(index)` (also for entries already held), `:conflict` or `:term_behind` | `:unknown_member`, `:own_seat`, `:malformed`, `:too_many_entries`, `:rival_leader`, `:mismatch`, `:committed_conflict` |
-| `acknowledge(peer, response)` | `Received` of `:advanced`, `:duplicate` (at or below the recorded match), `:conflict` or `:overtaken` (term adopted) | `:unknown_member`, `:own_seat`, `:stale`, `:not_leader`, `:beyond_log` |
+| Call | Honoured | Refusals | Records the clock |
+| --- | --- | --- | --- |
+| `begin_election` | `VoteRequest` | `:term_exhausted` | no |
+| `request_vote(request)` | `Received` of a `VoteResponse` whose `vote` is `:granted`, `:duplicate` (this candidate already has the vote), `Denied(:term_behind)`, `Denied(:already_voted)` or `Denied(:log_behind)` | `:unknown_member`, `:own_seat` | no |
+| `receive_vote(peer, response)` | `Received` of `:counted`, `:elected`, `:duplicate` (member already counted), `:denied` or `:overtaken` (term adopted) | `:unknown_member`, `:own_seat`, `:stale`, `:not_candidate` | no |
+| `propose(command)` | the new index | `:not_leader`, `:log_full` | no |
+| `append_entries(request, entries)` | `Received` of an `AppendResponse` whose `append` is `Matched(index)` (also for entries already held), `:conflict` or `:term_behind` | `:unknown_member`, `:own_seat`, `:malformed` (entry terms going backwards or above the request's), `:too_many_entries`, `:rival_leader`, `:mismatch`, `:committed_conflict` | no |
+| `acknowledge(peer, response)` | `Received` of `:advanced`, `:duplicate` (at or below the recorded match), `:conflict` or `:overtaken` (term adopted) | `:unknown_member`, `:own_seat`, `:stale`, `:not_leader`, `:beyond_log` | no |
+
+There is no clock in this vessel: no call takes, reads or records one, so no answer depends on an instant.
+
+`Denied(...)`, `:conflict`, `:term_behind`, a ballot `:denied` and an ack `:conflict` say "no", and they are still honoured answers: they are protocol replies Raft sends back to the asker, and a refusal sends nothing back.
+
+The core answers `:malformed` to a vote request, a vote reply or an append reply that contradicts itself (a zero term, a position that cannot exist, a "term behind" from term one). None of those values can be built in Ruby (see below), and one forged past `initialize` (a leaked subclass, `Marshal.load`) raises `TypeError` or `RangeError` before the node is asked, so `request_vote`, `receive_vote` and `acknowledge` never answer it here; in the core, such a reply is refused before its term is looked at, so it never moves a node into the term it carries.
 
 What the refusals mean:
 
 - `:unknown_member`, `:own_seat`: the index is not another member's seat.
-- `:malformed`: the message contradicts itself. A zero term, a position that can't exist in the message's term, entry terms going backwards.
-- `:too_many_entries`: the entries end past index 64.
+- `:malformed`: the entries contradict the request: an entry term above the request's, or entry terms going backwards. (A zero term or an impossible position can't reach the node: those values raise when you build them.)
+- `:too_many_entries`: the entries end past index `Raft::CAPACITY` (64).
 - `:stale`: a response from a term the node has left, or one answering a request it sent back then.
 - `:not_candidate`, `:not_leader`: a response for the current term, but the node isn't in the role that asked.
 - `:rival_leader`: an append from someone else in the term this node leads. One term, one leader; the node keeps its log.
 - `:mismatch`: an entry differs from the one the log holds at the same index and term.
 - `:committed_conflict`: the entries would replace one the node has committed.
-
-`:mismatch` and `:committed_conflict` are not part of the conversation between honest nodes. They are refused even when the append carries a higher term: the node adopts no term, changes nothing and has no reply to send. Either this node's log or the sender's is corrupt (lost storage, an old checkpoint restored, two clusters wired together). Don't reply, don't retry around it: stop the node and tell an operator.
 - `:beyond_log`: a reply claims a match past the end of the leader's log.
 - `:log_full`, `:term_exhausted`: no room for another entry, no term after `2**64-1`.
 
-`Raft.new`, `Raft.restored`, `members`, `own`, `role`, `term`, `committed`, `last`, `entry` and `checkpoint` never refuse. The two constructors raise `ArgumentError` for a configuration that can't exist.
+`:mismatch` and `:committed_conflict` are not part of the conversation between honest nodes. They are refused even when the append carries a higher term: the node adopts no term, changes nothing and has no reply to send. Either this node's log or the sender's is corrupt (lost storage, an old checkpoint restored, two clusters wired together). Don't reply, don't retry around it: stop the node and tell an operator.
+
+`Raft.new`, `Raft.restored`, `members`, `own`, `role`, `term`, `committed`, `last`, `entry` and `checkpoint` never refuse. The two constructors raise `RangeError` for a configuration that can't exist or a checkpoint of another membership or seat.
 
 ## The Rules of the Vessel
 
-- **One to nine members**, all with distinct Integer ids. Your own index must be one of them. A majority is more than half of the real members, never padded.
+- **One to nine members** (`Raft::MEMBERS`, the core's `Raft::MEMBERS` sizes the gem is compiled for), all with distinct Integer ids. Your own index must be one of them. A majority is more than half of the real members, never padded.
 - **Ids, terms, indices, and proposals are Integers** in `0..2**64-1`. Floats and strings raise `TypeError`. Negative or oversized raise `RangeError`.
 - **Terms and indices are protocol numbers, not handles.** Every member has to agree on what term 7 and index 3 mean, on every node and after every restart, so they are bare Integers with no scope, they mean the same thing cluster-wide on purpose, and they live in the checkpoint. An index is handed out again when an uncommitted tail is replaced; only index and term together name an entry.
-- **Values mirror the core.** `Position`, `Entry`, `VoteRequest`, `VoteResponse`, `AppendRequest`, `AppendResponse`, `Received` and `Checkpoint` are `Data` with the core struct's fields in the core's order, passed positionally. An enum variant with a field is a `Data` named after it (`Denied`, `Matched`); one without is a Symbol (`:granted`, `:conflict`, every role). Passing anything else raises `TypeError`; an unknown symbol raises `ArgumentError`.
+- **Values mirror the core.** `Position`, `Entry`, `VoteRequest`, `VoteResponse`, `AppendRequest`, `AppendResponse`, `Received` and `Checkpoint` are `Data` with the core struct's fields in the core's order, passed positionally. An enum variant with a field is a `Data` named after it (`Denied`, `Matched`); one without is a Symbol (`:granted`, `:conflict`, every role). Passing anything else raises `TypeError`; an unknown symbol raises `RangeError`.
+- **A value is valid or does not exist.** Every `Data` goes through the core's validating constructor, on `new` and on `with`, whoever builds it: `Position.new(1, 0)`, `Entry.new(0, 7)`, `VoteRequest.new(0, 0, EMPTY)`, `VoteResponse.new(1, Denied.new(:term_behind))`, `Received.new(nil, :follower, :elected)` and a `Checkpoint` no node can be in (a vote in term zero included) all raise `RangeError`; a wrong type raises `TypeError`. `ArgumentError` is Ruby's own, for the wrong number of arguments. `Checkpoint` stores frozen copies of its two Arrays.
+- **The binding never loses work.** Every check that can raise runs before the node is asked. Building the answer runs Ruby (`Received.new`, `VoteRequest.new` and the rest), so the node decides on a copy, the answer is built, and the copy is kept only if the node is still unfrozen (`FrozenError` otherwise) and unchanged (`RuntimeError` otherwise: something re-entered it while the answer was built). A call that raised changed nothing. `propose` answers an Integer or a Symbol and decides in place.
+- **The binding is the authority on values.** Every `Data` class is sealed (no `allocate`, no subclass), but Ruby binds a subclass constant before `inherited` raises, `Data#initialize` can be bound directly and `Marshal.load` skips `initialize`. So the native side reads a message, an entry or a checkpoint only when it is exactly this gem's class (a subclass raises `TypeError`, whatever it holds) and checks every field again through the core's constructor (`RangeError`): a forged value never reaches the node and never earns `:malformed`.
 - **A refusal is a Symbol, never an exception, and changes nothing.** A higher term in a refused message is not adopted.
-- **The log holds 64 entries.** `propose` answers `:log_full` when it's full. Nothing is evicted.
+- **The log holds 64 entries** (`Raft::CAPACITY`, the core's `Raft::CAPACITY`). `propose` answers `:log_full` when it's full. Nothing is evicted.
 - **A single-member cluster leads on `begin_election` and commits on `propose`.** It is its own majority.
 - **Bad input changes nothing.** Every argument is checked before any state moves. A malformed entries array raises `TypeError` and the node is exactly as it was. Entries are never coerced: no `to_ary`, no duck typing.
 - **No clock.** Terms and indices are logical. Election timeouts and heartbeats are yours.

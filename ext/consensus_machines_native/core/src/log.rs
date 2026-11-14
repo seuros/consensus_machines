@@ -12,14 +12,19 @@ pub enum Plan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Log<const L: usize> {
-    entries: [Option<Entry>; L],
+    /// The first `len` slots are the log; the rest hold the placeholder
+    /// `Entry::default()` and are never read.
+    entries: [Entry; L],
     len: usize,
 }
 
 impl<const L: usize> Log<L> {
     pub(crate) const fn new() -> Self {
         Self {
-            entries: [None; L],
+            entries: [Entry {
+                term: 0,
+                command: 0,
+            }; L],
             len: 0,
         }
     }
@@ -32,8 +37,13 @@ impl<const L: usize> Log<L> {
         if index == 0 || index > self.len {
             None
         } else {
-            self.entries[index - 1]
+            Some(self.entries[index - 1])
         }
+    }
+
+    /// The entries held, in index order: index `i` is `held()[i - 1]`.
+    pub(crate) fn held(&self) -> &[Entry] {
+        &self.entries[..self.len]
     }
 
     pub(crate) fn last(&self) -> Position {
@@ -47,7 +57,7 @@ impl<const L: usize> Log<L> {
         if self.len == L {
             return None;
         }
-        self.entries[self.len] = Some(entry);
+        self.entries[self.len] = entry;
         self.len += 1;
         Some(self.len)
     }
@@ -86,10 +96,8 @@ impl<const L: usize> Log<L> {
     pub(crate) fn rewrite(&mut self, previous: usize, incoming: &[Entry], offset: usize) {
         let keep = previous + offset;
         let end = previous + incoming.len();
-        self.entries[keep..self.len.max(keep)].fill(None);
-        for (slot, entry) in self.entries[keep..end].iter_mut().zip(&incoming[offset..]) {
-            *slot = Some(*entry);
-        }
+        self.entries[keep..self.len.max(keep)].fill(Entry::default());
+        self.entries[keep..end].copy_from_slice(&incoming[offset..]);
         self.len = end;
     }
 

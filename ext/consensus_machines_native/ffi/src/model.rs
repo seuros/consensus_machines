@@ -4,8 +4,16 @@ use consensus_machines::{
     Refusal, Role, VoteRequest, VoteResponse,
 };
 
-/// Log capacity compiled into the binding.
+use std::any::Any;
+use std::ops::RangeInclusive;
+
+/// Log capacity compiled into the binding: the core's `L`, exposed as
+/// `Raft::CAPACITY` like the core's.
 pub const LOG: usize = 64;
+
+/// The membership sizes compiled into the binding: every core `N` that
+/// [`build`] dispatches to, exposed as `Raft::MEMBERS`.
+pub const MEMBERS: RangeInclusive<usize> = 1..=9;
 
 /// A core `Checkpoint` of any membership size, field for field.
 pub struct Saved {
@@ -17,7 +25,13 @@ pub struct Saved {
     pub entries: Vec<Entry>,
 }
 
-pub trait Model: Send {
+pub trait Model: Send + Any {
+    /// A copy of this server, for a decision held until its answer exists.
+    fn boxed(&self) -> Box<dyn Model>;
+    /// Whether `other` is this very state: the same membership size and
+    /// every field equal.
+    fn same(&self, other: &dyn Model) -> bool;
+    fn as_any(&self) -> &dyn Any;
     fn members(&self) -> Vec<u64>;
     fn own(&self) -> usize;
     fn role(&self) -> Role;
@@ -47,6 +61,15 @@ pub trait Model: Send {
 }
 
 impl<const N: usize> Model for Raft<N, LOG> {
+    fn boxed(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+    fn same(&self, other: &dyn Model) -> bool {
+        other.as_any().downcast_ref::<Self>() == Some(self)
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
     fn members(&self) -> Vec<u64> {
         self.members().to_vec()
     }
@@ -110,6 +133,21 @@ impl<const N: usize> Model for Raft<N, LOG> {
                 .filter_map(|index| saved.entry(index))
                 .collect(),
         }
+    }
+}
+
+/// A server of any membership size, cloned and compared as a value.
+pub struct Node(pub Box<dyn Model>);
+
+impl Clone for Node {
+    fn clone(&self) -> Self {
+        Self(self.0.boxed())
+    }
+}
+
+impl PartialEq for Node {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.same(&*other.0)
     }
 }
 

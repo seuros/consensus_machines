@@ -11,10 +11,7 @@ impl<const N: usize, const L: usize> Raft<N, L> {
     ///
     /// [`Refusal::NotLeader`]; [`Refusal::LogFull`]. Nothing changed.
     pub fn propose(&mut self, command: u64) -> Result<usize, Refusal> {
-        match self.role {
-            Role::Leader => {}
-            Role::Follower | Role::Candidate => return Err(Refusal::NotLeader),
-        }
+        self.leading()?;
         let entry = Entry {
             term: self.term(),
             command,
@@ -78,11 +75,16 @@ impl<const N: usize, const L: usize> Raft<N, L> {
 
     /// Fold one authenticated append reply into the leader's progress.
     ///
-    /// A higher term is adopted and answered [`Ack::Overtaken`].
+    /// The reply is checked with [`AppendResponse::new`] before its term is
+    /// looked at, so a reply no follower can send never moves this server
+    /// into its term. A higher term is then adopted and answered
+    /// [`Ack::Overtaken`].
     ///
     /// # Errors
     ///
     /// [`Refusal::UnknownMember`], [`Refusal::OwnSeat`] for the peer index;
+    /// [`Refusal::Malformed`] for a reply [`AppendResponse::new`] rejects (a
+    /// zero term, or `TermBehind` below term two);
     /// [`Refusal::Stale`] for a response from a lower term, or one that says
     /// `TermBehind` without being from a higher one; [`Refusal::NotLeader`]
     /// for a response of the current term given to a server that does not lead
@@ -94,17 +96,12 @@ impl<const N: usize, const L: usize> Raft<N, L> {
         response: AppendResponse,
     ) -> Result<Received<Ack>, Refusal> {
         self.peer(peer)?;
-        if response.term > self.term() {
-            let adopted = self.adopt(response.term);
-            return Ok(self.received(adopted, Ack::Overtaken));
+        let response =
+            AppendResponse::new(response.term, response.append).ok_or(Refusal::Malformed)?;
+        if let Some(adopted) = self.reply_term(response.term)? {
+            return Ok(self.received(Some(adopted), Ack::Overtaken));
         }
-        if response.term < self.term() {
-            return Err(Refusal::Stale);
-        }
-        match self.role {
-            Role::Leader => {}
-            Role::Follower | Role::Candidate => return Err(Refusal::NotLeader),
-        }
+        self.leading()?;
         let ack = match response.append {
             Append::TermBehind => return Err(Refusal::Stale),
             Append::Conflict => Ack::Conflict,
@@ -124,15 +121,17 @@ impl<const N: usize, const L: usize> Raft<N, L> {
     /// The checks a request passes or fails on its own, whatever this server
     /// holds.
     fn well_formed(request: AppendRequest, entries: &[Entry]) -> Result<(), Refusal> {
+        let request = AppendRequest::new(
+            request.leader,
+            request.term,
+            request.previous,
+            request.committed,
+        )
+        .ok_or(Refusal::Malformed)?;
         let previous = request.previous;
-        if request.term == 0
-            || previous.term > request.term
-            || (previous.index == 0) != (previous.term == 0)
-        {
-            return Err(Refusal::Malformed);
-        }
-        let mut floor = previous.term.max(1);
+        let mut floor = previous.term;
         for entry in entries {
+            let entry = Entry::new(entry.term, entry.command).ok_or(Refusal::Malformed)?;
             if entry.term < floor || entry.term > request.term {
                 return Err(Refusal::Malformed);
             }

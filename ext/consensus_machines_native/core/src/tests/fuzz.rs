@@ -24,6 +24,12 @@ impl Seen {
         }
     }
 
+    /// An honoured repeat: the server equals its clone.
+    fn repeat(&mut self, before: &Node, after: &Node) {
+        assert_eq!(after, before, "an honoured repeat changed the server");
+        self.repeats += 1;
+    }
+
     fn vote(&mut self, term: u64, seat: usize) {
         for (earlier, given) in &self.votes {
             assert!(*earlier != term || *given == seat, "two votes in one term");
@@ -48,7 +54,7 @@ fn durable(before: &Node, after: &Node) {
 }
 
 /// Stage one of an inbound message: the answer reports the adoption exactly.
-fn reconciled<T>(
+fn reconciled<T: Outcome + PartialEq + Debug>(
     seen: &mut Seen,
     before: &Node,
     after: &Node,
@@ -61,6 +67,10 @@ fn reconciled<T>(
             seen.refusal(*refusal);
         }
         Ok(received) => {
+            // Every answer the server gives is one its validating
+            // constructor accepts, so a binding can rebuild it.
+            let rebuilt = Received::new(received.adopted, received.role, received.outcome);
+            assert_eq!(rebuilt.as_ref(), Some(received));
             assert_eq!(received.role, after.role());
             if let Some(term) = received.adopted {
                 assert_eq!(term, sent);
@@ -74,6 +84,17 @@ fn reconciled<T>(
             }
         }
     }
+}
+
+/// Whether a reply from a real peer was one its constructor rejects (`valid`
+/// is false). Such a reply is refused `Malformed` before its term is looked
+/// at; `reconciled` has already proved it changed nothing.
+fn impossible<T>(before: &Node, peer: usize, valid: bool, answer: &Result<T, Refusal>) -> bool {
+    let impossible = !valid && peer < MEMBERS.len() && peer != before.own();
+    if impossible {
+        assert_eq!(answer.as_ref().err(), Some(&Refusal::Malformed));
+    }
+    impossible
 }
 
 /// A position around `term`: mostly plausible, sometimes impossible.
@@ -104,8 +125,7 @@ fn vote_request(node: &mut Node, rng: &mut Rng, seen: &mut Seen, peer: usize, te
         Vote::Granted => seen.vote(node.term(), peer),
         Vote::Duplicate => {
             assert!(seen.votes.contains(&(node.term(), peer)));
-            assert_eq!(*node, before);
-            seen.repeats += 1;
+            seen.repeat(&before, node);
         }
         Vote::Denied(Denial::TermBehind) => assert_eq!(*node, before),
         Vote::Denied(Denial::AlreadyVoted | Denial::LogBehind) => assert_eq!(
@@ -125,16 +145,21 @@ fn vote_reply(node: &mut Node, rng: &mut Rng, seen: &mut Seen, peer: usize, term
     };
     let answer = node.receive_vote(peer, VoteResponse { term, vote });
     reconciled(seen, &before, node, term, &answer);
+    if impossible(
+        &before,
+        peer,
+        VoteResponse::new(term, vote).is_some(),
+        &answer,
+    ) {
+        return;
+    }
     let Ok(received) = answer else { return };
     assert_eq!(
         received.outcome == Ballot::Overtaken,
         received.adopted.is_some()
     );
     match received.outcome {
-        Ballot::Duplicate | Ballot::Denied => {
-            assert_eq!(*node, before);
-            seen.repeats += 1;
-        }
+        Ballot::Duplicate | Ballot::Denied => seen.repeat(&before, node),
         Ballot::Elected => assert_eq!(node.role(), Role::Leader),
         Ballot::Counted | Ballot::Overtaken => {}
     }
@@ -192,16 +217,21 @@ fn append_reply(node: &mut Node, rng: &mut Rng, seen: &mut Seen, peer: usize, te
     };
     let answer = node.acknowledge(peer, AppendResponse { term, append });
     reconciled(seen, &before, node, term, &answer);
+    if impossible(
+        &before,
+        peer,
+        AppendResponse::new(term, append).is_some(),
+        &answer,
+    ) {
+        return;
+    }
     let Ok(received) = answer else { return };
     assert_eq!(
         received.outcome == Ack::Overtaken,
         received.adopted.is_some()
     );
     match received.outcome {
-        Ack::Duplicate | Ack::Conflict => {
-            assert_eq!(*node, before);
-            seen.repeats += 1;
-        }
+        Ack::Duplicate | Ack::Conflict => seen.repeat(&before, node),
         Ack::Advanced | Ack::Overtaken => {}
     }
 }
@@ -211,6 +241,10 @@ fn local(node: &mut Node, rng: &mut Rng, seen: &mut Seen) {
     let answer = if rng.below(3) == 0 {
         node.begin_election().map(|request| {
             assert_eq!(request.term, before.term() + 1);
+            assert_eq!(
+                VoteRequest::new(request.candidate, request.term, request.last),
+                Some(request)
+            );
             seen.vote(request.term, before.own());
         })
     } else {

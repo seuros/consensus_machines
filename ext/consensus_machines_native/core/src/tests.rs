@@ -8,16 +8,29 @@ mod fuzz;
 mod refusals;
 mod replication;
 mod restore;
+mod values;
 
 use core::fmt::Debug;
 
 use super::*;
 
 const MEMBERS: [u64; 3] = [10, 20, 30];
-const EMPTY: Position = Position { index: 0, term: 0 };
+const EMPTY: Position = at(0, 0);
 
 fn node<const L: usize>(own: usize) -> Raft<3, L> {
     Raft::new(MEMBERS, own).expect("membership")
+}
+
+const fn ask(candidate: usize, term: u64, last: Position) -> VoteRequest {
+    VoteRequest {
+        candidate,
+        term,
+        last,
+    }
+}
+
+const fn at(index: usize, term: u64) -> Position {
+    Position { index, term }
 }
 
 const fn ballot(term: u64, vote: Vote) -> VoteResponse {

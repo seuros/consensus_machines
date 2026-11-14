@@ -3,10 +3,15 @@ use quorum_machines::{Acknowledgement, Quorum};
 
 use crate::{Ballot, Denial, Raft, Received, Refusal, Role, Vote, VoteRequest, VoteResponse};
 
-/// Count one member, translating the tracker's own refusal.
+/// Count one member. Every caller has checked the seat, so the tracker's one
+/// refusal cannot occur; were it to, it is answered as the refusal it is and
+/// the caller has changed nothing yet.
 fn tally<const N: usize>(votes: &mut Quorum<N>, member: usize) -> Result<Acknowledgement, Refusal> {
     votes.acknowledge(member).map_err(|refusal| match refusal {
-        quorum_machines::Refusal::UnknownMember => Refusal::UnknownMember,
+        quorum_machines::Refusal::UnknownMember => {
+            debug_assert!(false, "seat {member} was checked against the membership");
+            Refusal::UnknownMember
+        }
     })
 }
 
@@ -58,10 +63,9 @@ impl<const N: usize, const L: usize> Raft<N, L> {
         request: VoteRequest,
     ) -> Result<Received<VoteResponse>, Refusal> {
         self.peer(request.candidate)?;
-        let last = request.last;
-        if request.term == 0 || last.term > request.term || (last.index == 0) != (last.term == 0) {
-            return Err(Refusal::Malformed);
-        }
+        let last = VoteRequest::new(request.candidate, request.term, request.last)
+            .ok_or(Refusal::Malformed)?
+            .last;
         if request.term < self.term() {
             return Ok(self.ballot(None, Vote::Denied(Denial::TermBehind)));
         }
@@ -85,12 +89,17 @@ impl<const N: usize, const L: usize> Raft<N, L> {
 
     /// Fold one authenticated ballot into the election.
     ///
-    /// A higher term is adopted and answered [`Ballot::Overtaken`]. A leader
-    /// still counts late grants of the term it won.
+    /// The reply is checked with [`VoteResponse::new`] before its term is
+    /// looked at, so a reply no voter can send never moves this server into
+    /// its term. A higher term is then adopted and answered
+    /// [`Ballot::Overtaken`]. A leader still counts late grants of the term it
+    /// won.
     ///
     /// # Errors
     ///
     /// [`Refusal::UnknownMember`], [`Refusal::OwnSeat`] for the peer index;
+    /// [`Refusal::Malformed`] for a reply [`VoteResponse::new`] rejects (a
+    /// zero term, or `Denied(TermBehind)` below term two);
     /// [`Refusal::Stale`] for a response from a lower term, or one that says
     /// `Denied(TermBehind)` without being from a higher one;
     /// [`Refusal::NotCandidate`] for a ballot of the current term given to a
@@ -101,36 +110,34 @@ impl<const N: usize, const L: usize> Raft<N, L> {
         response: VoteResponse,
     ) -> Result<Received<Ballot>, Refusal> {
         self.peer(peer)?;
-        if response.term > self.term() {
-            let adopted = self.adopt(response.term);
-            return Ok(self.received(adopted, Ballot::Overtaken));
+        let response = VoteResponse::new(response.term, response.vote).ok_or(Refusal::Malformed)?;
+        if let Some(adopted) = self.reply_term(response.term)? {
+            return Ok(self.received(Some(adopted), Ballot::Overtaken));
         }
-        if response.term < self.term() {
-            return Err(Refusal::Stale);
-        }
-        match self.role {
+        let campaigning = match self.role {
             Role::Follower => return Err(Refusal::NotCandidate),
-            Role::Candidate | Role::Leader => {}
-        }
+            Role::Candidate => true,
+            Role::Leader => false,
+        };
         let ballot = match response.vote {
             Vote::Denied(Denial::TermBehind) => return Err(Refusal::Stale),
             Vote::Denied(Denial::AlreadyVoted | Denial::LogBehind) => Ballot::Denied,
             Vote::Granted | Vote::Duplicate => match tally(&mut self.votes, peer)? {
                 Acknowledgement::Duplicate => Ballot::Duplicate,
-                Acknowledgement::Counted => self.counted(),
+                Acknowledgement::Counted => self.counted(campaigning),
             },
         };
         Ok(self.received(None, ballot))
     }
 
     /// A newly counted grant: the one that wins the election, or not yet.
-    fn counted(&mut self) -> Ballot {
-        match self.role {
-            Role::Candidate if self.votes.reached() => {
-                self.become_leader();
-                Ballot::Elected
-            }
-            Role::Candidate | Role::Leader | Role::Follower => Ballot::Counted,
+    /// A leader's late grants are counted and elect nobody twice.
+    fn counted(&mut self, campaigning: bool) -> Ballot {
+        if campaigning && self.votes.reached() {
+            self.become_leader();
+            Ballot::Elected
+        } else {
+            Ballot::Counted
         }
     }
 

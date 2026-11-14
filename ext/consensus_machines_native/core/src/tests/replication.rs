@@ -1,5 +1,17 @@
 use super::*;
 
+/// Seat 1 of three holding entries `(1, 1)` and `(1, 2)` from leader 0 in
+/// term 1, with `committed` of them committed.
+fn holding_two(committed: usize) -> Raft<3, 4> {
+    let mut follower = node(1);
+    let request = append(0, 1, EMPTY, committed);
+    let stored = follower
+        .append_entries(request, &[entry(1, 1), entry(1, 2)])
+        .expect("append");
+    assert_eq!(stored.outcome.append, Append::Matched(2));
+    follower
+}
+
 #[test]
 fn replication_commits_on_a_majority_and_reports_every_acknowledgement() {
     let mut leader = leader::<8>();
@@ -41,7 +53,7 @@ fn replication_commits_on_a_majority_and_reports_every_acknowledgement() {
 #[test]
 fn a_conflict_is_an_answer_and_a_higher_term_is_adopted_before_it() {
     let mut follower = node::<4>(1);
-    let missing = Position { index: 1, term: 1 };
+    let missing = at(1, 1);
     let conflict = follower
         .append_entries(append(0, 3, missing, 0), &[entry(3, 9)])
         .expect("append");
@@ -97,14 +109,9 @@ fn a_candidate_yields_to_the_leader_of_its_term_without_adopting() {
 
 #[test]
 fn conflicting_uncommitted_suffix_is_replaced_but_committed_prefix_is_immutable() {
-    let mut follower = node::<4>(1);
-    let request = append(0, 1, EMPTY, 1);
-    let stored = follower
-        .append_entries(request, &[entry(1, 1), entry(1, 2)])
-        .expect("append");
-    assert_eq!(stored.outcome.append, Append::Matched(2));
+    let mut follower = holding_two(1);
     assert_eq!(follower.committed(), 1);
-    let replacement = append(2, 2, Position { index: 1, term: 1 }, 1);
+    let replacement = append(2, 2, at(1, 1), 1);
     let replaced = follower
         .append_entries(replacement, &[entry(2, 3)])
         .expect("append");
@@ -118,7 +125,7 @@ fn conflicting_uncommitted_suffix_is_replaced_but_committed_prefix_is_immutable(
     refused(&mut follower, Refusal::CommittedConflict, |follower| {
         follower.append_entries(append(2, 9, EMPTY, 1), &[entry(9, 99)])
     });
-    let wrong = append(2, 9, Position { index: 1, term: 9 }, 1);
+    let wrong = append(2, 9, at(1, 9), 1);
     let conflict = follower.append_entries(wrong, &[]).expect("append");
     assert_eq!(conflict.adopted, Some(9));
     assert_eq!(conflict.outcome.append, Append::Conflict);
@@ -145,12 +152,7 @@ fn old_term_entries_need_a_current_term_entry_before_majority_commit() {
 
 #[test]
 fn empty_heartbeats_do_not_truncate_suffix_or_commit_unmatched_tail() {
-    let mut follower = node::<4>(1);
-    let request = append(0, 1, EMPTY, 0);
-    let stored = follower
-        .append_entries(request, &[entry(1, 1), entry(1, 2)])
-        .expect("append");
-    assert_eq!(stored.outcome.append, Append::Matched(2));
+    let mut follower = holding_two(0);
     let beat = unchanged(&mut follower, |follower| {
         follower.append_entries(append(0, 1, EMPTY, 2), &[])
     });

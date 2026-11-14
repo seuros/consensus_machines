@@ -6,17 +6,13 @@ fn a_checkpoint_is_a_plain_value_that_round_trips_through_its_readers() {
     follower
         .append_entries(append(0, 3, EMPTY, 1), &[entry(1, 5), entry(3, 6)])
         .expect("append");
-    let request = VoteRequest {
-        candidate: 2,
-        term: 4,
-        last: Position { index: 2, term: 3 },
-    };
+    let request = ask(2, 4, at(2, 3));
     follower.request_vote(request).expect("vote");
     let saved = follower.checkpoint();
     assert_eq!((saved.members(), saved.own()), (MEMBERS, 1));
     assert_eq!((saved.term(), saved.voted_for()), (4, Some(2)));
     assert_eq!(saved.committed(), 1);
-    assert_eq!(saved.last(), Position { index: 2, term: 3 });
+    assert_eq!(saved.last(), at(2, 3));
     let entries = [1, 2].map(|index| saved.entry(index).expect("entry"));
     assert_eq!(saved.entry(3), None);
     let rebuilt = Checkpoint::<3, 4>::new(
@@ -75,4 +71,13 @@ fn checkpoint_new_refuses_a_state_no_server_can_be_in() {
     let overlong = [entry(1, 1), entry(1, 2), entry(1, 3)];
     assert!(build(MEMBERS, 0, 2, None, 0, &overlong).is_none());
     assert!(Checkpoint::<0, 2>::new([], 0, 0, None, 0, &[]).is_none());
+}
+
+/// No server votes in term zero: the first vote is cast in the term an
+/// election started, which is at least one.
+#[test]
+fn checkpoint_new_refuses_a_vote_in_term_zero() {
+    assert!(Checkpoint::<3, 2>::new(MEMBERS, 0, 0, Some(1), 0, &[]).is_none());
+    assert!(Checkpoint::<3, 2>::new(MEMBERS, 0, 0, Some(0), 0, &[]).is_none());
+    assert!(Checkpoint::<3, 2>::new(MEMBERS, 0, 1, Some(1), 0, &[]).is_some());
 }

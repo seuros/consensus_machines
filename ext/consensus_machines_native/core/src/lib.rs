@@ -6,6 +6,7 @@ mod log;
 mod refusal;
 mod replication;
 mod types;
+mod valid;
 
 pub use checkpoint::Checkpoint;
 pub use refusal::Refusal;
@@ -13,6 +14,7 @@ pub use types::{
     Ack, Append, AppendRequest, AppendResponse, Ballot, Denial, Entry, Position, Received, Role,
     Vote, VoteRequest, VoteResponse,
 };
+pub use valid::Outcome;
 
 use log::Log;
 use quorum_machines::Quorum;
@@ -27,6 +29,12 @@ pub struct Raft<const N: usize, const L: usize> {
 }
 
 impl<const N: usize, const L: usize> Raft<N, L> {
+    /// Members of the static membership: `N`, exactly.
+    pub const MEMBERS: usize = N;
+
+    /// Most entries the log can hold: `L`, the compiled capacity.
+    pub const CAPACITY: usize = L;
+
     /// A follower in term zero with an empty log.
     ///
     /// `None` unless the members are distinct, at least one, and `own` is the
@@ -126,6 +134,23 @@ impl<const N: usize, const L: usize> Raft<N, L> {
         }
     }
 
+    /// Refuse a call meant for the leader of the current term.
+    const fn leading(&self) -> Result<(), Refusal> {
+        match self.role {
+            Role::Leader => Ok(()),
+            Role::Follower | Role::Candidate => Err(Refusal::NotLeader),
+        }
+    }
+
+    /// Stage one of an inbound reply its constructor accepted: a lower term
+    /// is `Stale`, a higher one is adopted and named, the same one kept.
+    const fn reply_term(&mut self, term: u64) -> Result<Option<u64>, Refusal> {
+        if term < self.state.term {
+            return Err(Refusal::Stale);
+        }
+        Ok(self.adopt(term))
+    }
+
     /// Stage one of every inbound message: move into the sender's term when
     /// it is higher, and say so.
     const fn adopt(&mut self, term: u64) -> Option<u64> {
@@ -156,18 +181,21 @@ impl<const N: usize, const L: usize> Raft<N, L> {
 
     /// Commit the highest current-term entry a majority has matched.
     fn advance_commit(&mut self) {
-        for index in (self.state.committed + 1..=self.state.log.len()).rev() {
-            if self
-                .entry(index)
-                .is_none_or(|entry| entry.term != self.term())
-            {
-                return;
-            }
-            let holders = self.matched.iter().filter(|held| **held >= index).count();
-            if holders >= self.votes.required() {
-                self.state.committed = index;
-                return;
-            }
+        let term = self.state.term;
+        let required = self.votes.required();
+        let reached = self
+            .state
+            .log
+            .held()
+            .iter()
+            .enumerate()
+            .skip(self.state.committed)
+            .rev()
+            .take_while(|(_, entry)| entry.term == term)
+            .map(|(offset, _)| offset + 1)
+            .find(|index| self.matched.iter().filter(|held| **held >= *index).count() >= required);
+        if let Some(index) = reached {
+            self.state.committed = index;
         }
     }
 }
