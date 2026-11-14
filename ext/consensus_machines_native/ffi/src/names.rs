@@ -1,10 +1,10 @@
 //! Symbols of every core enum, and the way back for those a caller hands
 //! in. Every enum is a `symbols!` table, checked against the enum by the
-//! compiler; `Vote` and `Append` carry data, so theirs are output-only
-//! (`names_only`) and a bare Symbol is read back by hand.
+//! compiler; `Vote` and `Append` carry data, so theirs are `names_only`
+//! and a bare Symbol reads back only their unit variants.
 use consensus_machines::{Ack, Append, Ballot, Denial, Refusal, Role, Vote};
 use magnus::{Error, Ruby, Symbol, Value};
-use matryona_machines::ruby::Symbols;
+use matryona_machines::ruby::{SymbolNames, Symbols};
 
 use crate::hooks::rejected;
 
@@ -97,24 +97,20 @@ pub fn to_denial(ruby: &Ruby, value: Value) -> Result<Denial, Error> {
 
 /// A vote given as a bare Symbol; a denial is a `Denied`, never a Symbol.
 pub fn to_vote(ruby: &Ruby, name: Symbol) -> Result<Vote, Error> {
-    match &*name.name()? {
-        "granted" => Ok(Vote::Granted),
-        "duplicate" => Ok(Vote::Duplicate),
-        _ => Err(rejected(
+    Votes::variant(&name.name()?).ok_or_else(|| {
+        rejected(
             ruby,
             "vote must be :granted, :duplicate or a Denied with a known reason",
-        )),
-    }
+        )
+    })
 }
 
 /// An append answer given as a bare Symbol; a match is a `Matched`.
 pub fn to_append(ruby: &Ruby, name: Symbol) -> Result<Append, Error> {
-    match &*name.name()? {
-        "conflict" => Ok(Append::Conflict),
-        "term_behind" => Ok(Append::TermBehind),
-        _ => Err(rejected(
+    Appends::variant(&name.name()?).ok_or_else(|| {
+        rejected(
             ruby,
             "append must be Matched(index), :conflict or :term_behind",
-        )),
-    }
+        )
+    })
 }

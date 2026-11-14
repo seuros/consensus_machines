@@ -6,7 +6,7 @@
 //! the fields it was given.
 use consensus_machines::{Outcome, Received, Role};
 use magnus::{Error, RModule, Ruby, Symbol, Value, function, prelude::*};
-use matryona_machines::ruby::{Symbols, exact_array, integer, optional, which};
+use matryona_machines::ruby::{Symbols, exact_array, integer, optional, which_fields};
 
 use crate::classes::classes;
 use crate::names::{self, Acks, Ballots};
@@ -124,14 +124,19 @@ fn received(ruby: &Ruby, adopted: Value, role: Value, outcome: Value) -> Result<
     }
     let classes = classes(ruby)?;
     let responses = [classes.vote_response, classes.append_response];
-    match which(outcome, &responses.map(|data| data.class.get(ruby))) {
-        Some(0) => given(ruby, adopted, role, read::vote_response(ruby, outcome)?),
-        Some(_) => given(ruby, adopted, role, read::append_response(ruby, outcome)?),
-        None => Err(Error::new(
-            ruby.exception_type_error(),
-            "expected a VoteResponse, an AppendResponse or a Symbol (exactly; none can be \
-             subclassed)",
-        )),
+    let (index, [term, answer]) = which_fields::<2>(
+        ruby,
+        outcome,
+        &responses.map(|data| data.class.get(ruby)),
+        "expected a VoteResponse, an AppendResponse or a Symbol (exactly; none can be \
+         subclassed)",
+    )?;
+    if index == 0 {
+        let response = read::vote_response_fields(ruby, term, answer)?;
+        given(ruby, adopted, role, response)
+    } else {
+        let response = read::append_response_fields(ruby, term, answer)?;
+        given(ruby, adopted, role, response)
     }
 }
 
