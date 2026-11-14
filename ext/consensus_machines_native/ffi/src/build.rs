@@ -1,11 +1,13 @@
 //! The answers of the mutating calls, built by each class's `new` (so Ruby
 //! runs) while the decision is held on a copy: see `matryona_machines::ruby::keep`.
-use consensus_machines::{AppendResponse, Received, Refusal, VoteRequest, VoteResponse};
+use consensus_machines::{
+    Append, AppendResponse, Received, Refusal, Vote, VoteRequest, VoteResponse,
+};
 use magnus::{ArgList, Error, Ruby, Value, prelude::*};
-use matryona_machines::ruby::{Symbols, symbol};
+use matryona_machines::ruby::{SymbolNames, Symbols};
 
 use crate::classes::{Classes, Data};
-use crate::names::{self, Denials, Refusals, Roles};
+use crate::names::{Appends, Denials, Refusals, Roles, Votes};
 
 /// A refusal's symbol.
 pub fn refused(ruby: &Ruby, refusal: Refusal) -> Value {
@@ -36,9 +38,9 @@ pub fn vote_response(
     classes: &Classes,
     response: VoteResponse,
 ) -> Result<Value, Error> {
-    let vote = match names::vote(response.vote) {
-        (_, Some(reason)) => new(ruby, classes.denied, (Denials::symbol(ruby, reason),))?,
-        (vote, None) => symbol(ruby, vote).as_value(),
+    let vote = match response.vote {
+        Vote::Denied(reason) => new(ruby, classes.denied, (Denials::symbol(ruby, reason),))?,
+        vote => Votes::symbol(ruby, &vote).as_value(),
     };
     new(ruby, classes.vote_response, (response.term, vote))
 }
@@ -49,9 +51,9 @@ pub fn append_response(
     classes: &Classes,
     response: AppendResponse,
 ) -> Result<Value, Error> {
-    let append = match names::append(response.append) {
-        (_, Some(at)) => new(ruby, classes.matched, (at,))?,
-        (append, None) => symbol(ruby, append).as_value(),
+    let append = match response.append {
+        Append::Matched(at) => new(ruby, classes.matched, (at,))?,
+        append => Appends::symbol(ruby, &append).as_value(),
     };
     new(ruby, classes.append_response, (response.term, append))
 }

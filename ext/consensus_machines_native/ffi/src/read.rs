@@ -9,7 +9,7 @@ use consensus_machines::{
 use magnus::{Error, RArray, Ruby, Symbol, Value};
 use matryona_machines::ruby::integer;
 
-use crate::classes::{Classes, classes, fields, is};
+use crate::classes::{Classes, classes, fields};
 use crate::hooks::rejected;
 use crate::names;
 
@@ -130,17 +130,5 @@ pub fn append_request(ruby: &Ruby, value: Value) -> Result<AppendRequest, Error>
             ruby,
             "an append request's term is positive and not below its previous position's",
         )
-    })
-}
-
-/// Whether `value` is exactly this gem's `VoteResponse` or `AppendResponse`.
-pub fn response_kind(ruby: &Ruby, value: Value) -> Result<Option<bool>, Error> {
-    let classes = classes(ruby)?;
-    Ok(if is(ruby, value, classes.vote_response) {
-        Some(true)
-    } else if is(ruby, value, classes.append_response) {
-        Some(false)
-    } else {
-        None
     })
 }

@@ -6,8 +6,8 @@
 //! bound directly, so `is_a?` is not enough. Its fields are read straight
 //! from the struct (no reader runs) and rebuilt through the core constructor,
 //! which `Marshal.load` skipped.
-use magnus::{Error, RModule, RStruct, Ruby, Value};
-use matryona_machines::ruby::{Class, Registry, exact_fields, instance_of};
+use magnus::{Error, RModule, Ruby, Value};
+use matryona_machines::ruby::{Class, Registry, exact_fields};
 
 /// A `Data` class the binding reads, and the `TypeError` message for any
 /// value that is not exactly an instance of it.
@@ -68,11 +68,6 @@ pub fn resolve(ruby: &Ruby, module: RModule) -> Result<(), Error> {
 /// The classes resolved at load.
 pub fn classes(ruby: &Ruby) -> Result<&'static Classes, Error> {
     CLASSES.get(ruby)
-}
-
-/// Whether `value` is a `Data` instance of exactly `data`, never a subclass.
-pub fn is(ruby: &Ruby, value: Value, data: Data) -> bool {
-    RStruct::from_value(value).is_some_and(|held| instance_of(held, data.class.get(ruby)))
 }
 
 /// The fields of `value`, in order, read from the struct: `TypeError` unless

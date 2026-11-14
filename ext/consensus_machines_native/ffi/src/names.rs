@@ -1,6 +1,7 @@
 //! Symbols of every core enum, and the way back for those a caller hands
-//! in. The unit-variant enums are `symbols!` tables, checked against the
-//! enum by the compiler; `Vote` and `Append` carry data and are matched here.
+//! in. Every enum is a `symbols!` table, checked against the enum by the
+//! compiler; `Vote` and `Append` carry data, so theirs are output-only
+//! (`names_only`) and a bare Symbol is read back by hand.
 use consensus_machines::{Ack, Append, Ballot, Denial, Refusal, Role, Vote};
 use magnus::{Error, Ruby, Symbol, Value};
 use matryona_machines::ruby::Symbols;
@@ -65,21 +66,22 @@ matryona_machines::symbols! {
     }
 }
 
-/// A vote as its variant name and, for `Denied`, the reason.
-pub const fn vote(vote: Vote) -> (&'static str, Option<Denial>) {
-    match vote {
-        Vote::Granted => ("granted", None),
-        Vote::Duplicate => ("duplicate", None),
-        Vote::Denied(reason) => ("denied", Some(reason)),
+matryona_machines::symbols! {
+    /// The core's votes as Symbols; a `Denied` leaves as a `Denied` value.
+    pub Votes for Vote as "a vote" => names_only {
+        Granted => "granted",
+        Duplicate => "duplicate",
+        Denied(..) => "denied",
     }
 }
 
-/// An append answer as its variant name and, for `Matched`, the index.
-pub const fn append(append: Append) -> (&'static str, Option<usize>) {
-    match append {
-        Append::Matched(index) => ("matched", Some(index)),
-        Append::Conflict => ("conflict", None),
-        Append::TermBehind => ("term_behind", None),
+matryona_machines::symbols! {
+    /// The core's append answers as Symbols; a `Matched` leaves as a
+    /// `Matched` value.
+    pub Appends for Append as "an append" => names_only {
+        Matched(..) => "matched",
+        Conflict => "conflict",
+        TermBehind => "term_behind",
     }
 }
 
@@ -91,24 +93,6 @@ pub fn to_role(ruby: &Ruby, value: Value) -> Result<Role, Error> {
 /// The `Denial` the Symbol `value` names.
 pub fn to_denial(ruby: &Ruby, value: Value) -> Result<Denial, Error> {
     Denials::parse(ruby, value)
-}
-
-/// The variant of table `T` named `name`, if it names one.
-fn named<T: Symbols>(name: &str) -> Option<T::Variant> {
-    T::ALL
-        .iter()
-        .copied()
-        .find(|variant| T::name(*variant) == name)
-}
-
-/// The `Ballot` a symbol names, if it names one.
-pub fn to_ballot(name: &str) -> Option<Ballot> {
-    named::<Ballots>(name)
-}
-
-/// The `Ack` a symbol names, if it names one.
-pub fn to_ack(name: &str) -> Option<Ack> {
-    named::<Acks>(name)
 }
 
 /// A vote given as a bare Symbol; a denial is a `Denied`, never a Symbol.

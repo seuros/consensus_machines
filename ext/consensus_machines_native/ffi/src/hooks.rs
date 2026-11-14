@@ -6,10 +6,12 @@
 //! the fields it was given.
 use consensus_machines::{Outcome, Received, Role};
 use magnus::{Error, RModule, Ruby, Symbol, Value, function, prelude::*};
-use matryona_machines::ruby::{exact_array, integer, optional};
+use matryona_machines::ruby::{Symbols, exact_array, integer, optional, which};
 
+use crate::classes::classes;
+use crate::names::{self, Acks, Ballots};
 use crate::read;
-use crate::{ENTRIES_ARRAY, MEMBERS_ARRAY, model, names, saved};
+use crate::{ENTRIES_ARRAY, MEMBERS_ARRAY, model, saved};
 
 /// A value of the right type the core rejects: out of the domain.
 pub fn rejected(ruby: &Ruby, what: &'static str) -> Error {
@@ -97,7 +99,7 @@ fn given_symbol(
     outcome: Symbol,
 ) -> Result<(), Error> {
     let name = outcome.name()?;
-    let (ballot, ack) = (names::to_ballot(&name), names::to_ack(&name));
+    let (ballot, ack) = (Ballots::variant(&name), Acks::variant(&name));
     if ballot.is_none() && ack.is_none() {
         return Err(rejected(
             ruby,
@@ -120,9 +122,11 @@ fn received(ruby: &Ruby, adopted: Value, role: Value, outcome: Value) -> Result<
     if let Some(name) = Symbol::from_value(outcome) {
         return given_symbol(ruby, adopted, role, name);
     }
-    match read::response_kind(ruby, outcome)? {
-        Some(true) => given(ruby, adopted, role, read::vote_response(ruby, outcome)?),
-        Some(false) => given(ruby, adopted, role, read::append_response(ruby, outcome)?),
+    let classes = classes(ruby)?;
+    let responses = [classes.vote_response, classes.append_response];
+    match which(outcome, &responses.map(|data| data.class.get(ruby))) {
+        Some(0) => given(ruby, adopted, role, read::vote_response(ruby, outcome)?),
+        Some(_) => given(ruby, adopted, role, read::append_response(ruby, outcome)?),
         None => Err(Error::new(
             ruby.exception_type_error(),
             "expected a VoteResponse, an AppendResponse or a Symbol (exactly; none can be \
