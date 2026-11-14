@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/seuros/consensus_machines/compare/consensus_machines/v0.3.0...consensus_machines/v0.4.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt matryona-machines 0.2 (NameError at load, exact_fields/exact_array, symbols!, frozen-first)
+
+### Features
+
+* adopt matryona-machines 0.2 (NameError at load, exact_fields/exact_array, symbols!, frozen-first) ([a52ed78](https://github.com/seuros/consensus_machines/commit/a52ed78f0c88467e986c46e9f38a49dd197dce3e))
+
 ## [0.3.0](https://github.com/seuros/consensus_machines/compare/consensus_machines/v0.2.0...consensus_machines/v0.3.0) (2026-11-14)
 
 
