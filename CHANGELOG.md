@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/seuros/consensus_machines/compare/consensus_machines/v0.5.0...consensus_machines/v0.5.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* fix wrapped classes at load so building a value runs no Ruby ([d474a68](https://github.com/seuros/consensus_machines/commit/d474a685f84dfca555303f393b83c5c40d49b0a9))
+
 ## [0.5.0](https://github.com/seuros/consensus_machines/compare/consensus_machines/v0.4.2...consensus_machines/v0.5.0) (2026-11-16)
 
 
