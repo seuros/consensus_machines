@@ -117,7 +117,7 @@ none of them adopts a term. "Stale request" is `term < own term`.
 
 | Call | Refusals, before any change | Stage 1: term | Stage 2: honoured outcome | Records the clock |
 | --- | --- | --- | --- | --- |
-| `begin_election()` | `TermExhausted` | issues `term + 1`, votes for itself | `VoteRequest`; a single member leads at once | no |
+| `begin_election()` | `Leading` (this server leads the current term); `TermExhausted` | issues `term + 1`, votes for itself | `VoteRequest`; a single member leads at once | no |
 | `request_vote(request)` | `UnknownMember`, `OwnSeat` (candidate); `Malformed` (fails `VoteRequest::new`) | stale: kept. higher: adopted | `Vote::Granted`; `Vote::Duplicate` (repeat from the candidate already voted for); `Vote::Denied(TermBehind)` (stale, nothing changed); `Vote::Denied(AlreadyVoted)`; `Vote::Denied(LogBehind)` | no |
 | `receive_vote(peer, response)` | `UnknownMember`, `OwnSeat` (peer); `Malformed` (fails `VoteResponse::new`, judged before the term); `Stale` (lower term, or `Denied(TermBehind)` not from a higher one); `NotCandidate` (current term, follower) | higher: adopted | `Ballot::Counted`; `Ballot::Elected`; `Ballot::Duplicate` (repeat); `Ballot::Denied`; `Ballot::Overtaken` (exactly when adopted) | no |
 | `propose(command)` | `NotLeader`, `LogFull` | none | the new index | no |

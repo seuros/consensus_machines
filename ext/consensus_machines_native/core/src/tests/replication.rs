@@ -108,6 +108,31 @@ fn a_candidate_yields_to_the_leader_of_its_term_without_adopting() {
 }
 
 #[test]
+fn a_shorter_replacement_drops_the_rest_of_the_conflicting_suffix() {
+    let mut follower = node::<4>(1);
+    let held = [entry(1, 1), entry(1, 2), entry(1, 3)];
+    let stored = follower
+        .append_entries(append(0, 1, EMPTY, 0), &held)
+        .expect("append");
+    assert_eq!(stored.outcome.append, Append::Matched(3));
+    let replaced = follower
+        .append_entries(append(2, 2, EMPTY, 0), &[entry(2, 7)])
+        .expect("append");
+    assert_eq!(replaced.outcome.append, Append::Matched(1));
+    assert_eq!(follower.last(), at(1, 2));
+    assert_eq!(follower.entry(1), Some(entry(2, 7)));
+    assert_eq!((follower.entry(2), follower.entry(3)), (None, None));
+    // The freed slots take new entries again, up to the capacity.
+    let refill = [entry(2, 8), entry(2, 9), entry(2, 10)];
+    let stored = follower
+        .append_entries(append(2, 2, at(1, 2), 0), &refill)
+        .expect("append");
+    assert_eq!(stored.outcome.append, Append::Matched(4));
+    assert_eq!(follower.entry(4), Some(entry(2, 10)));
+    assert_eq!(follower.entry(5), None);
+}
+
+#[test]
 fn conflicting_uncommitted_suffix_is_replaced_but_committed_prefix_is_immutable() {
     let mut follower = holding_two(1);
     assert_eq!(follower.committed(), 1);
@@ -136,6 +161,8 @@ fn conflicting_uncommitted_suffix_is_replaced_but_committed_prefix_is_immutable(
 fn old_term_entries_need_a_current_term_entry_before_majority_commit() {
     let mut node = leader::<8>();
     assert_eq!(node.propose(7), Ok(1)); // Term 1, not yet committed.
+    // Restarted, the leader is a follower and may stand for the next term.
+    let mut node = Raft::restored(MEMBERS, 0, node.checkpoint()).expect("checkpoint");
     let request = node.begin_election().expect("next term");
     let won = node
         .receive_vote(1, ballot(request.term, Vote::Granted))

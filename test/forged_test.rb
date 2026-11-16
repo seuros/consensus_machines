@@ -107,6 +107,21 @@ class ForgedTest < Minitest::Test
     assert_equal before, [raft.checkpoint, raft.role]
   end
 
+  # The Arrays are checked natively, not with a Ruby `is_a?`: a subclass
+  # whose `dup` answers a valid plain Array is still a subclass, and the
+  # message is the native one.
+  def test_a_checkpoint_never_asks_its_arrays_to_copy_themselves
+    sneaky = Class.new(Array) { define_method(:dup) { [10, 11, 12] } }
+    tidy = Class.new(Array) { define_method(:dup) { [Entry.new(1, 1)] } }
+
+    error = assert_raises(TypeError) { Checkpoint.new(sneaky[10, 11, 12], 0, 0, nil, 0, []) }
+    assert_equal 'members must be an Array of Integers', error.message
+    error = assert_raises(TypeError) { Checkpoint.new([10, 11, 12], 0, 1, nil, 0, tidy[Entry.new(1, 1)]) }
+    assert_equal 'entries must be an Array of ConsensusMachines::Entry', error.message
+    error = assert_raises(TypeError) { Checkpoint.new({}, 0, 0, nil, 0, []) }
+    assert_equal 'members must be an Array of Integers', error.message
+  end
+
   # Runs the block with every reader in `names` of `klass` raising.
   def with_raising_readers(klass, *names)
     names.each do |name|

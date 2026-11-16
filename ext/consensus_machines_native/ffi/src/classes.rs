@@ -7,7 +7,7 @@
 //! from the struct (no reader runs) and rebuilt through the core constructor,
 //! which `Marshal.load` skipped.
 use magnus::{Error, RModule, Ruby, Value};
-use matryona_machines::ruby::{Class, Registry, exact_fields};
+use matryona_machines::ruby::{Class, exact_fields};
 
 /// A `Data` class the binding reads, and the `TypeError` message for any
 /// value that is not exactly an instance of it.
@@ -31,7 +31,11 @@ pub struct Classes {
     pub checkpoint: Data,
 }
 
-static CLASSES: Registry<Classes> = Registry::new("consensus_machines");
+matryona_machines::registry! {
+    static CLASSES: Classes = "consensus_machines";
+    /// The classes resolved at load.
+    pub fn classes;
+}
 
 /// Resolve the classes `consensus_machines.rb` defined before requiring the
 /// extension. A missing one is a `NameError` (the extension was loaded
@@ -63,11 +67,6 @@ pub fn resolve(ruby: &Ruby, module: RModule) -> Result<(), Error> {
         checkpoint: data!("Checkpoint"),
     };
     CLASSES.set(ruby, classes).map(drop)
-}
-
-/// The classes resolved at load.
-pub fn classes(ruby: &Ruby) -> Result<&'static Classes, Error> {
-    CLASSES.get(ruby)
 }
 
 /// The fields of `value`, in order, read from the struct: `TypeError` unless

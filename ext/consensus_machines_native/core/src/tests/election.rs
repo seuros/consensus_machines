@@ -190,3 +190,23 @@ fn all_three_voter_request_orders_preserve_one_majority_per_term_across_restarts
         }
     }
 }
+
+#[test]
+fn a_leader_is_refused_an_election_that_would_depose_it() {
+    let mut leader = leader::<4>();
+    assert_eq!(leader.propose(7), Ok(1));
+    refuses(&mut leader, Refusal::Leading, Raft::begin_election);
+    assert_eq!((leader.role(), leader.term()), (Role::Leader, 1));
+    // A single member leads at once and is refused the next election too,
+    // ahead of an exhausted term.
+    let mut alone = Raft::<1, 1>::new([1], 0).expect("membership");
+    alone.begin_election().expect("term");
+    refuses(&mut alone, Refusal::Leading, Raft::begin_election);
+    // A candidate may stand again: its election may have split.
+    let mut candidate = node::<4>(0);
+    candidate.begin_election().expect("term");
+    assert_eq!(
+        candidate.begin_election().map(|request| request.term),
+        Ok(2)
+    );
+}

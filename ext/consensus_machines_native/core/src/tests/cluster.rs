@@ -106,7 +106,8 @@ impl<const N: usize> Cluster<N> {
             | Refusal::Mismatch
             | Refusal::CommittedConflict
             | Refusal::BeyondLog
-            | Refusal::TermExhausted => panic!("an honest cluster was refused {refusal:?}"),
+            | Refusal::TermExhausted
+            | Refusal::Leading => panic!("an honest cluster was refused {refusal:?}"),
         }
         if !tally.refusals.contains(&refusal) {
             tally.refusals.push(refusal);
@@ -249,6 +250,14 @@ impl<const N: usize> Cluster<N> {
         match below(&mut self.rng, 120) {
             0 => {
                 let before = self.nodes[seat].clone();
+                if before.role() == Role::Leader {
+                    // A leader's stray election timer deposes nobody.
+                    let refused = self.nodes[seat].begin_election();
+                    assert_eq!(refused, Err(Refusal::Leading));
+                    assert_eq!(self.nodes[seat], before);
+                    self.check(tally);
+                    return;
+                }
                 let request = self.nodes[seat].begin_election().expect("terms remain");
                 self.depose(&before, seat);
                 assert_eq!(self.nodes[seat].role(), Role::Candidate);

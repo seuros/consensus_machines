@@ -26,7 +26,7 @@ module ConsensusMachines
   # method below lists exactly the ones it can answer.
   type refusal = :unknown_member | :own_seat | :malformed | :too_many_entries | :stale | :not_candidate
                | :not_leader | :rival_leader | :mismatch | :committed_conflict | :beyond_log | :log_full
-               | :term_exhausted
+               | :term_exhausted | :leading
 
   # `Position::new`: index and term both zero, or both set.
   class Position < Data
@@ -135,6 +135,7 @@ module ConsensusMachines
   # mutating call raises FrozenError on a frozen server. No method takes or
   # records a clock. Denials inside a VoteResponse or AppendResponse, and
   # Ballot :denied / Ack :conflict, are protocol replies: honoured answers.
+  # Sealed: no allocator, and subclassing raises TypeError.
   class Raft
     # The core's `Raft::MEMBERS` (`N`) values the gem is compiled for: 1..9.
     MEMBERS: Range[Integer]
@@ -154,7 +155,9 @@ module ConsensusMachines
     def last: () -> Position
     def entry: (Integer index) -> Entry?
     def checkpoint: () -> Checkpoint
-    def begin_election: () -> (VoteRequest | :term_exhausted)
+    # Refused :leading when this node leads the current term (a stray
+    # election timer must not depose it), :term_exhausted at 2**64-1.
+    def begin_election: () -> (VoteRequest | :leading | :term_exhausted)
     # The core answers :malformed to an impossible request; a VoteRequest
     # that exists is never one, and one forged past `initialize` (a leaked
     # subclass, Marshal) raises TypeError or RangeError before the server is
@@ -170,5 +173,45 @@ module ConsensusMachines
                             | :too_many_entries | :rival_leader | :mismatch | :committed_conflict)
     def acknowledge: (Integer peer, AppendResponse response)
                      -> (Received[ack] | :unknown_member | :own_seat | :stale | :not_leader | :beyond_log)
+
+    private
+
+    # The native readers `last`, `entry` and `checkpoint` build their Data
+    # values from: the fields in order, the log flattened to term, command
+    # pairs.
+    def native_last: () -> [Integer, Integer]
+    def native_entry: (Integer index) -> [Integer, Integer]?
+    def native_checkpoint: () -> [Array[Integer], Integer, Integer, Integer?, Integer, Array[Integer]]
   end
+
+  # What Received#outcome may hold.
+  type outcome = VoteResponse | AppendResponse | ballot | ack
+
+  # Private native hooks behind every Data constructor: each raises for a
+  # value the core rejects and answers nil, except `__checkpoint`, which
+  # answers the frozen copies of the members and entries to store.
+  private def self.__position: (Integer index, Integer term) -> nil
+  private def self.__entry: (Integer term, Integer command) -> nil
+  private def self.__vote_request: (Integer candidate, Integer term, Position last) -> nil
+  private def self.__vote_response: (Integer term, vote vote) -> nil
+  private def self.__denied: (denial reason) -> nil
+  private def self.__append_request: (Integer leader, Integer term, Position previous, Integer committed) -> nil
+  private def self.__append_response: (Integer term, append append) -> nil
+  private def self.__matched: (Integer index) -> nil
+  private def self.__received: (Integer? adopted, role role, outcome outcome) -> nil
+  private def self.__checkpoint: (Array[Integer] members, Integer own, Integer term, Integer? voted_for,
+                                  Integer committed, Array[Entry] entries) -> [Array[Integer], Array[Entry]]
+  # Dispatches to the hook named by its first argument.
+  private def self.check: (:__position, Integer index, Integer term) -> nil
+                        | (:__entry, Integer term, Integer command) -> nil
+                        | (:__vote_request, Integer candidate, Integer term, Position last) -> nil
+                        | (:__vote_response, Integer term, vote vote) -> nil
+                        | (:__denied, denial reason) -> nil
+                        | (:__append_request, Integer leader, Integer term, Position previous,
+                           Integer committed) -> nil
+                        | (:__append_response, Integer term, append append) -> nil
+                        | (:__matched, Integer index) -> nil
+                        | (:__received, Integer? adopted, role role, outcome outcome) -> nil
+                        | (:__checkpoint, Array[Integer] members, Integer own, Integer term, Integer? voted_for,
+                           Integer committed, Array[Entry] entries) -> [Array[Integer], Array[Entry]]
 end

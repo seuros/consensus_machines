@@ -18,12 +18,18 @@ fn tally<const N: usize>(votes: &mut Quorum<N>, member: usize) -> Result<Acknowl
 impl<const N: usize, const L: usize> Raft<N, L> {
     /// Start the next term as a candidate and vote for this server. Persist
     /// before broadcasting the request. A single-member cluster is its own
-    /// majority and leads at once; read [`Self::role`].
+    /// majority and leads at once; read [`Self::role`]. A follower or a
+    /// candidate (whose election may have split) may stand; a leader may not.
     ///
     /// # Errors
     ///
-    /// [`Refusal::TermExhausted`] at `u64::MAX`; nothing changed.
+    /// [`Refusal::Leading`] when this server leads the current term: a stray
+    /// election timer must not depose it. [`Refusal::TermExhausted`] at
+    /// `u64::MAX`. Nothing changed.
     pub fn begin_election(&mut self) -> Result<VoteRequest, Refusal> {
+        if self.role == Role::Leader {
+            return Err(Refusal::Leading);
+        }
         let term = self
             .state
             .term

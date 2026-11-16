@@ -231,7 +231,7 @@ A call that is honoured answers with a value. A call that is not honoured answer
 
 | Call | Honoured | Refusals | Records the clock |
 | --- | --- | --- | --- |
-| `begin_election` | `VoteRequest` | `:term_exhausted` | no |
+| `begin_election` | `VoteRequest` | `:leading`, `:term_exhausted` | no |
 | `request_vote(request)` | `Received` of a `VoteResponse` whose `vote` is `:granted`, `:duplicate` (this candidate already has the vote), `Denied(:term_behind)`, `Denied(:already_voted)` or `Denied(:log_behind)` | `:unknown_member`, `:own_seat` | no |
 | `receive_vote(peer, response)` | `Received` of `:counted`, `:elected`, `:duplicate` (member already counted), `:denied` or `:overtaken` (term adopted) | `:unknown_member`, `:own_seat`, `:stale`, `:not_candidate` | no |
 | `propose(command)` | the new index | `:not_leader`, `:log_full` | no |
@@ -256,6 +256,7 @@ What the refusals mean:
 - `:committed_conflict`: the entries would replace one the node has committed.
 - `:beyond_log`: a reply claims a match past the end of the leader's log.
 - `:log_full`, `:term_exhausted`: no room for another entry, no term after `2**64-1`.
+- `:leading`: `begin_election` on the node that leads the current term. A stray election timer on a working leader would depose it for nothing; a follower or a candidate (whose election split) may stand.
 
 `:mismatch` and `:committed_conflict` are not part of the conversation between honest nodes. They are refused even when the append carries a higher term: the node adopts no term, changes nothing and has no reply to send. Either this node's log or the sender's is corrupt (lost storage, an old checkpoint restored, two clusters wired together). Don't reply, don't retry around it: stop the node and tell an operator.
 
@@ -269,7 +270,7 @@ What the refusals mean:
 - **Values mirror the core.** `Position`, `Entry`, `VoteRequest`, `VoteResponse`, `AppendRequest`, `AppendResponse`, `Received` and `Checkpoint` are `Data` with the core struct's fields in the core's order, passed positionally. An enum variant with a field is a `Data` named after it (`Denied`, `Matched`); one without is a Symbol (`:granted`, `:conflict`, every role). Passing anything else raises `TypeError`; an unknown symbol raises `RangeError`.
 - **A value is valid or does not exist.** Every `Data` goes through the core's validating constructor, on `new` and on `with`, whoever builds it: `Position.new(1, 0)`, `Entry.new(0, 7)`, `VoteRequest.new(0, 0, EMPTY)`, `VoteResponse.new(1, Denied.new(:term_behind))`, `Received.new(nil, :follower, :elected)` and a `Checkpoint` no node can be in (a vote in term zero included) all raise `RangeError`; a wrong type raises `TypeError`. `ArgumentError` is Ruby's own, for the wrong number of arguments. `Checkpoint` stores frozen copies of its two Arrays.
 - **The binding never loses work.** Every check that can raise runs before the node is asked. Building the answer runs Ruby (`Received.new`, `VoteRequest.new` and the rest), so the node decides on a copy, the answer is built, and the copy is kept only if the node is still unfrozen (`FrozenError` otherwise) and unchanged (`RuntimeError` otherwise: something re-entered it while the answer was built). A call that raised changed nothing. `propose` answers an Integer or a Symbol and decides in place.
-- **The binding is the authority on values.** Every `Data` class is sealed (no `allocate`, no subclass), but Ruby binds a subclass constant before `inherited` raises, `Data#initialize` can be bound directly and `Marshal.load` skips `initialize`. So the native side reads a message, an entry or a checkpoint only when it is exactly this gem's class (a subclass raises `TypeError`, whatever it holds) and checks every field again through the core's constructor (`RangeError`): a forged value never reaches the node and never earns `:malformed`.
+- **The binding is the authority on values.** Every `Data` class is sealed (no `allocate`, no subclass), but Ruby binds a subclass constant before `inherited` raises, `Data#initialize` can be bound directly and `Marshal.load` skips `initialize`. So the native side reads a message, an entry or a checkpoint only when it is exactly this gem's class (a subclass raises `TypeError`, whatever it holds) and checks every field again through the core's constructor (`RangeError`): a forged value never reaches the node and never earns `:malformed`. `Raft` itself is sealed too: it wraps native state, has no `allocate`, and subclassing it raises `TypeError`.
 - **A refusal is a Symbol, never an exception, and changes nothing.** A higher term in a refused message is not adopted.
 - **The log holds 64 entries** (`Raft::CAPACITY`, the core's `Raft::CAPACITY`). `propose` answers `:log_full` when it's full. Nothing is evicted.
 - **A single-member cluster leads on `begin_election` and commits on `propose`.** It is its own majority.

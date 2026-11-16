@@ -7,10 +7,14 @@ class RefusalTest < Minitest::Test
 
   HIGH = 9
 
-  def test_begin_election_refuses_only_the_last_term
+  def test_begin_election_refuses_the_last_term_and_a_leader
     last = Checkpoint.new(members, 0, 2**64 - 1, nil, 0, [])
     raft = Raft.restored(members, 0, last)
     assert_refused(:term_exhausted, raft, &:begin_election)
+    alone = Raft.new([1], 0)
+    alone.begin_election
+    assert_equal :leader, alone.role
+    assert_refused(:leading, alone, &:begin_election)
   end
 
   def test_request_vote_refusals
@@ -69,6 +73,8 @@ class RefusalTest < Minitest::Test
   def test_acknowledge_refusals
     raft = leader
     raft.propose(7)
+    # A leader may not stand again; restarted, it is a follower and may.
+    raft = Raft.restored(members, 0, raft.checkpoint)
     raft.begin_election
     raft.receive_vote(1, granted(2))
     assert_equal :leader, raft.role

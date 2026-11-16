@@ -1,4 +1,3 @@
-#![allow(clippy::expect_used)]
 extern crate std;
 
 mod cluster;

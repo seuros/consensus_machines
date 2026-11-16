@@ -108,12 +108,10 @@ module ConsensusMachines
   # Raft::MEMBERS members and at most Raft::CAPACITY entries; both Arrays are stored as frozen copies.
   Checkpoint = Data.define(:members, :own, :term, :voted_for, :committed, :entries) do
     def initialize(members:, own:, term:, voted_for:, committed:, entries:)
-      raise TypeError, "members must be an Array, not #{members.class}" unless members.is_a?(Array)
-      raise TypeError, "entries must be an Array, not #{entries.class}" unless entries.is_a?(Array)
-
-      members = members.dup.freeze
-      entries = entries.dup.freeze
-      ConsensusMachines.__send__(:check, :__checkpoint, members, own, term, voted_for, committed, entries)
+      # The native side checks both Arrays by exact class and answers the
+      # frozen copies to store, so no Ruby method of either runs.
+      members, entries =
+        ConsensusMachines.__send__(:check, :__checkpoint, members, own, term, voted_for, committed, entries)
       super
     end
   end
@@ -159,4 +157,8 @@ module ConsensusMachines
       Checkpoint.new(members, own, term, voted_for, committed, entries)
     end
   end
+
+  # Raft wraps native state and has no allocator: a subclass's `new` would
+  # build a Raft anyway, so subclassing raises too.
+  Raft.define_singleton_method(:inherited) { |_| raise TypeError, "#{Raft} cannot be subclassed" }
 end

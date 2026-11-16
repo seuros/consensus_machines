@@ -33,6 +33,7 @@ matryona_machines::symbols! {
         BeyondLog => "beyond_log",
         LogFull => "log_full",
         TermExhausted => "term_exhausted",
+        Leading => "leading",
     }
 }
 

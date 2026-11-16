@@ -302,6 +302,7 @@ fn hostile_input_never_breaks_a_refusal_a_repeat_or_a_durable_promise() {
         Refusal::CommittedConflict,
         Refusal::BeyondLog,
         Refusal::LogFull,
+        Refusal::Leading,
     ];
     for refusal in expected {
         assert!(seen.refusals.contains(&refusal), "never saw {refusal:?}");

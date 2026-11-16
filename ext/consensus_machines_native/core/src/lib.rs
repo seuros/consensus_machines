@@ -1,5 +1,6 @@
 #![no_std]
 #![doc = include_str!("../README.md")]
+#![cfg_attr(not(test), deny(clippy::indexing_slicing))]
 mod checkpoint;
 mod election;
 mod log;
@@ -25,6 +26,8 @@ pub struct Raft<const N: usize, const L: usize> {
     state: Checkpoint<N, L>,
     role: Role,
     votes: Quorum<N>,
+    /// Highest index each peer is known to hold, while leading. The own
+    /// seat's slot stays zero: the leader holds its whole log.
     matched: [usize; N],
 }
 
@@ -175,11 +178,14 @@ impl<const N: usize, const L: usize> Raft<N, L> {
     fn become_leader(&mut self) {
         self.role = Role::Leader;
         self.matched = [0; N];
-        self.matched[self.state.own] = self.state.log.len();
         self.advance_commit();
     }
 
     /// Commit the highest current-term entry a majority has matched.
+    ///
+    /// The leader holds every entry of its own log, so its seat always counts
+    /// and is never stored: `matched` is written only for peers, and its own
+    /// slot stays zero, below every index.
     fn advance_commit(&mut self) {
         let term = self.state.term;
         let required = self.votes.required();
@@ -192,8 +198,12 @@ impl<const N: usize, const L: usize> Raft<N, L> {
             .skip(self.state.committed)
             .rev()
             .take_while(|(_, entry)| entry.term == term)
+            // An offset into the held entries, so one more stays within `L`.
             .map(|(offset, _)| offset + 1)
-            .find(|index| self.matched.iter().filter(|held| **held >= *index).count() >= required);
+            .find(|index| {
+                let peers = self.matched.iter().filter(|held| **held >= *index).count();
+                peers >= required.saturating_sub(1)
+            });
         if let Some(index) = reached {
             self.state.committed = index;
         }

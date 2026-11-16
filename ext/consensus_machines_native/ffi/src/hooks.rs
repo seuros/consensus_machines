@@ -3,9 +3,10 @@
 //! raises `TypeError` while the arguments convert (a nested value that is not
 //! exactly this gem's class included); a value of the right type the core
 //! rejects raises `RangeError`. Each hook answers nil and the Ruby side keeps
-//! the fields it was given.
+//! the fields it was given, except `__checkpoint`, which answers the frozen
+//! Array copies to store.
 use consensus_machines::{Outcome, Received, Role};
-use magnus::{Error, RModule, Ruby, Symbol, Value, function, prelude::*};
+use magnus::{Error, RArray, RModule, Ruby, Symbol, Value, function, prelude::*};
 use matryona_machines::ruby::{Symbols, exact_array, integer, optional, which_fields};
 
 use crate::classes::classes;
@@ -141,8 +142,10 @@ fn received(ruby: &Ruby, adopted: Value, role: Value, outcome: Value) -> Result<
 }
 
 /// `Checkpoint.new`: the core's `Checkpoint::new`, for the membership size
-/// it names. `members` and `entries` are exactly Arrays (no subclass),
-/// `entries` of exactly this gem's `Entry`.
+/// it names. `members` and `entries` are exactly Arrays (no subclass, so no
+/// redefined `dup` either), `entries` of exactly this gem's `Entry`. Answers
+/// the frozen copies of both Arrays the value stores, taken here, so what is
+/// stored is what was checked.
 fn checkpoint(
     ruby: &Ruby,
     members: Value,
@@ -151,15 +154,16 @@ fn checkpoint(
     voted_for: Value,
     committed: Value,
     entries: Value,
-) -> Result<(), Error> {
+) -> Result<(RArray, RArray), Error> {
     let members = exact_array(ruby, members, MEMBERS_ARRAY)?;
     let (own, term) = (integer(own, "own")?, integer(term, "term")?);
     let voted_for = optional(voted_for, "voted_for")?;
     let committed = integer(committed, "committed")?;
     let entries = exact_array(ruby, entries, ENTRIES_ARRAY)?;
+    let (members, entries) = (frozen_copy(members), frozen_copy(entries));
     let saved = saved(ruby, (members, own, term, voted_for, committed, entries))?;
     model::build(&saved.members, saved.own, Some(&saved))
-        .map(drop)
+        .map(|_| (members, entries))
         .ok_or_else(|| {
             rejected(
                 ruby,
@@ -168,6 +172,13 @@ fn checkpoint(
                  nor above the term, at most 64 entries, committed within them",
             )
         })
+}
+
+/// A frozen copy of `array`, made without calling any Ruby method on it.
+fn frozen_copy(array: RArray) -> RArray {
+    let copy = array.dup();
+    copy.freeze();
+    copy
 }
 
 pub fn define(module: RModule) -> Result<(), Error> {

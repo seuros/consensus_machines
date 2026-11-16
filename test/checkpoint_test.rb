@@ -12,6 +12,8 @@ class CheckpointTest < Minitest::Test
     assert_raises(ArgumentError) { Raft.new([1]) }
     assert_raises(TypeError) { Raft.new([1.1], 0) }
     assert_raises(TypeError) { Raft.allocate }
+    error = assert_raises(TypeError) { Class.new(Raft) }
+    assert_equal 'ConsensusMachines::Raft cannot be subclassed', error.message
   end
 
   def test_a_checkpoint_is_plain_data_that_can_be_rebuilt_from_its_fields
@@ -104,5 +106,7 @@ class CheckpointTest < Minitest::Test
     assert_equal [members, [Entry.new(1, 1)]], [saved.members, saved.entries]
     assert_predicate saved.members, :frozen?
     assert_predicate saved.entries, :frozen?
+    refute_same list, saved.members
+    refute_same entries, saved.entries
   end
 end

@@ -111,5 +111,5 @@ pub fn distinct(members: &[u64]) -> bool {
         && members
             .iter()
             .enumerate()
-            .all(|(index, member)| !members[..index].contains(member))
+            .all(|(index, member)| !members.iter().take(index).any(|other| other == member))
 }

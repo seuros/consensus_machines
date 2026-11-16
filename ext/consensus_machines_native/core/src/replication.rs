@@ -17,7 +17,6 @@ impl<const N: usize, const L: usize> Raft<N, L> {
             command,
         };
         let index = self.state.log.push(entry).ok_or(Refusal::LogFull)?;
-        self.matched[self.state.own] = index;
         self.advance_commit();
         Ok(index)
     }
@@ -57,14 +56,27 @@ impl<const N: usize, const L: usize> Raft<N, L> {
             .state
             .log
             .plan(previous, entries, self.state.committed)?;
+        // The log is written before the term is adopted: a rewrite that
+        // cannot fit then refuses with nothing changed. Nothing in between
+        // reads the other, so the order is not observable otherwise.
+        if let Plan::Matched {
+            rewrite: Some(offset),
+        } = plan
+            && self
+                .state
+                .log
+                .rewrite(previous.index, entries, offset)
+                .is_none()
+        {
+            debug_assert!(false, "well_formed checked the entries end within L");
+            return Err(Refusal::TooManyEntries);
+        }
         let adopted = self.adopt(request.term);
         self.role = Role::Follower;
         let append = match plan {
             Plan::Conflict => Append::Conflict,
-            Plan::Matched { rewrite } => {
-                if let Some(offset) = rewrite {
-                    self.state.log.rewrite(previous.index, entries, offset);
-                }
+            Plan::Matched { .. } => {
+                // `well_formed` checked the entries end within `L`.
                 let end = previous.index + entries.len();
                 self.state.committed = self.state.committed.max(request.committed.min(end));
                 Append::Matched(end)
@@ -108,11 +120,18 @@ impl<const N: usize, const L: usize> Raft<N, L> {
             Append::Matched(index) if index > self.state.log.len() => {
                 return Err(Refusal::BeyondLog);
             }
-            Append::Matched(index) if index <= self.matched[peer] => Ack::Duplicate,
             Append::Matched(index) => {
-                self.matched[peer] = index;
-                self.advance_commit();
-                Ack::Advanced
+                let Some(held) = self.matched.get_mut(peer) else {
+                    debug_assert!(false, "peer() refused every index past N");
+                    return Err(Refusal::UnknownMember);
+                };
+                if index <= *held {
+                    Ack::Duplicate
+                } else {
+                    *held = index;
+                    self.advance_commit();
+                    Ack::Advanced
+                }
             }
         };
         Ok(self.received(None, ack))

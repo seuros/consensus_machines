@@ -123,6 +123,8 @@ fn append_entries_refusals_change_nothing_and_adopt_no_term() {
 fn acknowledge_refusals_change_nothing_and_adopt_no_term() {
     let mut leader = leader::<4>();
     assert_eq!(leader.propose(7), Ok(1));
+    // A leader never stands again; restarted, it is a follower and may.
+    let mut leader = Raft::restored(MEMBERS, 0, leader.checkpoint()).expect("checkpoint");
     leader.begin_election().expect("term");
     let won = leader.receive_vote(1, ballot(2, Vote::Granted));
     assert_eq!(won.expect("ballot").outcome, Ballot::Elected);
@@ -203,6 +205,7 @@ fn refusals_read_as_sentences() {
         Refusal::BeyondLog,
         Refusal::LogFull,
         Refusal::TermExhausted,
+        Refusal::Leading,
     ];
     for (index, refusal) in all.iter().enumerate() {
         let text = refusal.to_string();

@@ -35,6 +35,9 @@ pub enum Refusal {
     LogFull,
     /// The term is `u64::MAX`; no later term exists.
     TermExhausted,
+    /// This server leads the current term: an election would depose a
+    /// working leader for nothing.
+    Leading,
 }
 
 impl fmt::Display for Refusal {
@@ -53,6 +56,7 @@ impl fmt::Display for Refusal {
             Self::BeyondLog => "the response reports a match past the end of the log",
             Self::LogFull => "the log is full",
             Self::TermExhausted => "no later term exists",
+            Self::Leading => "this server leads the current term",
         })
     }
 }
