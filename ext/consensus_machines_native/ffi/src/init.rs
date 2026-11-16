@@ -1,5 +1,6 @@
 //! Private initialization boundary.
 use magnus::{Error, Ruby, function, method, prelude::*};
+use matryona_machines::ruby::Class;
 
 use consensus_machines::Raft;
 
@@ -32,5 +33,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("propose", method!(Wrapper::propose, 1))?;
     class.define_method("append_entries", method!(Wrapper::append_entries, 2))?;
     class.define_method("acknowledge", method!(Wrapper::acknowledge, 2))?;
-    class.define_private_method("native_checkpoint", method!(Wrapper::checkpoint, 0))
+    class.define_private_method("native_checkpoint", method!(Wrapper::checkpoint, 0))?;
+    // Fix magnus's class for Raft now: building one later runs no Ruby.
+    Class::pin_wrapped::<Wrapper>(ruby, class).map(drop)
 }
