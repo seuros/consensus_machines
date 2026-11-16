@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/seuros/consensus_machines/compare/consensus-machines-v0.5.0...consensus-machines-v0.6.0) (2026-11-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* refuse begin_election on a leader with :leading
+
+### Features
+
+* refuse begin_election on a leader with :leading ([75d0f38](https://github.com/seuros/consensus_machines/commit/75d0f3880e45c9f0868cbd962ab2450f953c8f1b))
+
 ## [0.5.0](https://github.com/seuros/consensus_machines/compare/consensus-machines-v0.4.0...consensus-machines-v0.5.0) (2026-11-14)
 
 
